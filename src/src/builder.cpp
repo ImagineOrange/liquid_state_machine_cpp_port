@@ -609,4 +609,225 @@ void build_full_network(SphericalNetwork& net, ZoneInfo& zone_info,
     }
 }
 
+// ============================================================
+// LOAD PRE-BUILT NETWORK FROM PYTHON SNAPSHOT
+// ============================================================
+
+void load_network_snapshot(SphericalNetwork& net, ZoneInfo& zone_info,
+                           const std::string& npz_path, double dt,
+                           bool quiet) {
+    if (!quiet) printf("\n=== Loading network snapshot: %s ===\n", npz_path.c_str());
+
+    NpzFile npz = load_npz(npz_path);
+
+    // --- Scalars ---
+    int n = (int)npz["n_neurons"].as_scalar_int();
+    net.n_neurons = n;
+    net.sphere_radius = *npz["sphere_radius"].as_float64();
+
+    if (!quiet) printf("  Neurons: %d, radius: %.4f\n", n, net.sphere_radius);
+
+    // --- Per-neuron booleans ---
+    {
+        const auto& arr = npz["is_inhibitory"];
+        const uint8_t* src = reinterpret_cast<const uint8_t*>(arr.raw_data.data());
+        net.is_inhibitory.resize(n);
+        for (int i = 0; i < n; i++) net.is_inhibitory[i] = (src[i] != 0);
+    }
+    {
+        const auto& arr = npz["is_slow_inhibitory"];
+        const uint8_t* src = reinterpret_cast<const uint8_t*>(arr.raw_data.data());
+        net.is_slow_inhibitory.resize(n);
+        for (int i = 0; i < n; i++) net.is_slow_inhibitory[i] = (src[i] != 0);
+    }
+
+    // --- Per-neuron float64 arrays ---
+    auto load_f64 = [&](const std::string& name) -> std::vector<double> {
+        return npz[name].to_float64_vec();
+    };
+
+    net.v_rest = load_f64("v_rest");
+    net.v_threshold = load_f64("v_threshold");
+    net.v_reset = load_f64("v_reset");
+    net.tau_m = load_f64("tau_m");
+    net.tau_ref = load_f64("tau_ref");
+    net.tau_e = load_f64("tau_e");
+    net.tau_i = load_f64("tau_i");
+    net.tau_nmda = load_f64("tau_nmda");
+    net.adaptation_increment = load_f64("adaptation_increment");
+    net.tau_adaptation = load_f64("tau_adaptation");
+    net.e_reversal_arr = load_f64("e_reversal_arr");
+    net.i_reversal_arr = load_f64("i_reversal_arr");
+    net.k_reversal_arr = load_f64("k_reversal_arr");
+    net.v_noise_amp_arr = load_f64("v_noise_amp_arr");
+    net.i_noise_amp_arr = load_f64("i_noise_amp_arr");
+    net.tau_i_slow = load_f64("tau_i_slow");
+
+    // --- Scalar fields derived from arrays ---
+    net.e_reversal = net.e_reversal_arr[0];
+    net.i_reversal = net.i_reversal_arr[0];
+    net.v_noise_amp_scalar = net.v_noise_amp_arr[0];
+    net.i_noise_amp_scalar = net.i_noise_amp_arr[0];
+
+    // NMDA parameters (use defaults; these don't vary per-snapshot)
+    net.nmda_ratio = 0.5;
+    net.mg_concentration = 1.0;
+    net._mg_factor = 1.0 / 3.57;
+    net.weight_scale = 0.55;
+    net.distance_lambda = 0.18;
+    net.lambda_decay_ie = 0.15;
+    net.lambda_connect = 0.0;
+
+    // --- 3D positions ---
+    {
+        auto pos_vec = load_f64("positions");
+        net.positions.resize(n);
+        for (int i = 0; i < n; i++) {
+            net.positions[i] = {pos_vec[i * 3], pos_vec[i * 3 + 1], pos_vec[i * 3 + 2]};
+        }
+    }
+
+    // --- Weight and delay matrices (n x n row-major) ---
+    net.weights = load_f64("weights");
+    net.delays = load_f64("delays");
+
+    // --- Init dynamic state ---
+    net.v = net.v_rest;
+    net.g_e.assign(n, 0.0);
+    net.g_i.assign(n, 0.0);
+    net.g_i_slow.assign(n, 0.0);
+    net.g_nmda.assign(n, 0.0);
+    net.adaptation.assign(n, 0.0);
+    net.t_since_spike.resize(n);
+    for (int i = 0; i < n; i++) net.t_since_spike[i] = net.tau_ref[i] + 1e-5;
+
+    net.network_activity.clear();
+    net.current_avalanche_size = 0;
+    net.current_avalanche_start = -1;
+    net.ring_initialized = false;
+
+    // --- Connection stats ---
+    net.nonzero_connections = 0;
+    net.connection_counts_by_type = {{"ee", 0}, {"ei", 0}, {"ie", 0}, {"ii", 0}};
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            double w = net.weights[i * n + j];
+            if (w != 0.0) {
+                net.nonzero_connections++;
+                bool si = net.is_inhibitory[i], tj = net.is_inhibitory[j];
+                std::string ct;
+                if (si && tj) ct = "ii";
+                else if (si) ct = "ie";
+                else if (tj) ct = "ei";
+                else ct = "ee";
+                net.connection_counts_by_type[ct]++;
+            }
+        }
+    }
+    net.attempted_connections = net.nonzero_connections;
+
+    // Connection probabilities (for reference)
+    net.connection_probabilities = {{"ee", 0.10}, {"ei", 0.15}, {"ie", 0.25}, {"ii", 0.15}};
+
+    // --- Build CSR and precompute decay ---
+    net.build_csr();
+    net.precompute_decay_factors(dt);
+
+    // --- Zone info ---
+    {
+        auto v = npz["input_zone_indices"].to_int32_vec();
+        zone_info.input_zone_indices.assign(v.begin(), v.end());
+    }
+    {
+        auto v = npz["reservoir_zone_indices"].to_int32_vec();
+        zone_info.reservoir_zone_indices.assign(v.begin(), v.end());
+    }
+    {
+        auto v = npz["input_neuron_indices"].to_int32_vec();
+        zone_info.input_neuron_indices.assign(v.begin(), v.end());
+    }
+    zone_info.y_threshold = *npz["y_threshold"].as_float64();
+    zone_info.sphere_radius = net.sphere_radius;
+    zone_info.connectivity_regime = "default";
+
+    // Input neuron mapping (n_mel x k matrix, -1 = unused)
+    {
+        const auto& arr = npz["input_neuron_mapping"];
+        int n_mel = (int)arr.shape[0];
+        int k = (int)arr.shape[1];
+        auto flat = arr.to_int32_vec();
+        zone_info.input_neuron_mapping.clear();
+        for (int mel = 0; mel < n_mel; mel++) {
+            std::vector<int> mapped;
+            for (int j = 0; j < k; j++) {
+                int nid = flat[mel * k + j];
+                if (nid >= 0) mapped.push_back(nid);
+            }
+            zone_info.input_neuron_mapping[mel] = mapped;
+        }
+    }
+
+    if (!quiet) {
+        int n_exc = 0;
+        for (int i = 0; i < n; i++) if (!net.is_inhibitory[i]) n_exc++;
+        printf("  E: %d, I: %d\n", n_exc, n - n_exc);
+        printf("  Non-zero connections: %d\n", net.nonzero_connections);
+        printf("  Reservoir: %d neurons\n", (int)zone_info.reservoir_zone_indices.size());
+        printf("  Input zone: %d neurons\n", (int)zone_info.input_zone_indices.size());
+        printf("  Input neurons (arc): %d\n", (int)zone_info.input_neuron_indices.size());
+        printf("=== Snapshot loaded ===\n\n");
+    }
+}
+
+void print_network_fingerprint(const SphericalNetwork& net,
+                                const ZoneInfo& zone_info) {
+    int n = net.n_neurons;
+    int n_exc = 0;
+    for (int i = 0; i < n; i++) if (!net.is_inhibitory[i]) n_exc++;
+
+    int n_nonzero = 0;
+    double w_sum = 0.0, w_abssum = 0.0;
+    for (int i = 0; i < n * n; i++) {
+        double w = net.weights[i];
+        if (w != 0.0) {
+            n_nonzero++;
+            w_sum += w;
+            w_abssum += std::abs(w);
+        }
+    }
+
+    double v_rest_mean = 0, tau_m_mean = 0, adapt_inc_mean = 0;
+    double tau_adapt_mean = 0, tau_nmda_mean = 0;
+    for (int i = 0; i < n; i++) {
+        v_rest_mean += net.v_rest[i];
+        tau_m_mean += net.tau_m[i];
+        adapt_inc_mean += net.adaptation_increment[i];
+        tau_adapt_mean += net.tau_adaptation[i];
+        tau_nmda_mean += net.tau_nmda[i];
+    }
+    v_rest_mean /= n;
+    tau_m_mean /= n;
+    adapt_inc_mean /= n;
+    tau_adapt_mean /= n;
+    tau_nmda_mean /= n;
+
+    printf("\n=== Network fingerprint ===\n");
+    printf("  n_neurons: %d\n", n);
+    printf("  sphere_radius: %.10f\n", net.sphere_radius);
+    printf("  n_excitatory: %d\n", n_exc);
+    printf("  n_inhibitory: %d\n", n - n_exc);
+    printf("  nonzero_weights: %d\n", n_nonzero);
+    printf("  weight_sum: %.10f\n", w_sum);
+    printf("  weight_abssum: %.10f\n", w_abssum);
+    printf("  v_rest_mean: %.10f\n", v_rest_mean);
+    printf("  tau_m_mean: %.10f\n", tau_m_mean);
+    printf("  adapt_inc_mean: %.10f\n", adapt_inc_mean);
+    printf("  tau_adapt_mean: %.10f\n", tau_adapt_mean);
+    printf("  tau_nmda_mean: %.10f\n", tau_nmda_mean);
+    printf("  n_reservoir: %d\n", (int)zone_info.reservoir_zone_indices.size());
+    printf("  n_input_zone: %d\n", (int)zone_info.input_zone_indices.size());
+    printf("  n_input_neurons: %d\n", (int)zone_info.input_neuron_indices.size());
+    printf("===========================\n\n");
+}
+
 } // namespace cls

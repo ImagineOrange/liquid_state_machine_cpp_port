@@ -1,5 +1,6 @@
 #pragma once
 #include "network.h"
+#include "npz_reader.h"
 #include "common.h"
 #include <map>
 #include <set>
@@ -87,5 +88,16 @@ void build_full_network(SphericalNetwork& net, ZoneInfo& zone_info,
                         const DynamicalOverrides* dyn_ovr = nullptr,
                         const std::string& connectivity_regime = "default",
                         bool remove_nonarc = false);
+
+// Load pre-built network from Python-exported .npz snapshot.
+// This bypasses all RNG-dependent construction, giving bit-identical
+// network topology regardless of the C++ random library implementation.
+void load_network_snapshot(SphericalNetwork& net, ZoneInfo& zone_info,
+                           const std::string& npz_path, double dt,
+                           bool quiet = false);
+
+// Print network fingerprint for cross-checking with Python export.
+void print_network_fingerprint(const SphericalNetwork& net,
+                                const ZoneInfo& zone_info);
 
 } // namespace cls

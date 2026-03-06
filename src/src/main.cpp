@@ -29,11 +29,14 @@ static const std::vector<int> DEFAULT_DIGITS = {0, 1, 2, 3, 4};
 static const int N_DIGITS = 5;
 static const double BIN_MS = 20.0;
 static const double POST_STIM_MS = 200.0;
-static const int SAMPLES_PER_DIGIT = 500;
+static int SAMPLES_PER_DIGIT = 500;
 static const int N_SPLIT_REPEATS = 5;
 static const std::vector<double> RIDGE_ALPHAS = {0.01, 0.1, 1.0, 10.0, 100.0, 1000.0};
 static const int SEED = 42;
 static const int SAMPLE_LOAD_SEED = 42;
+
+// Network snapshot path (set via --snapshot CLI arg; empty = build from RNG)
+static std::string g_snapshot_path;
 
 // LHS-021 params
 static const double LHS021_LAMBDA_CONNECT = 0.003288382505082908;
@@ -355,8 +358,14 @@ static AllSamplesResult run_all_samples(const NetworkConfig& cfg,
         // Each thread builds its own network
         SphericalNetwork net;
         ZoneInfo zone_info;
-        build_full_network(net, zone_info, cfg, sim_cfg.dt, true,
-                          &dyn_ovr, "default", true);
+        if (!g_snapshot_path.empty()) {
+            load_network_snapshot(net, zone_info, g_snapshot_path, sim_cfg.dt, true);
+            // Apply per-grid-point adaptation overrides on top of snapshot
+            apply_dynamical_overrides(net, zone_info, sim_cfg.dt, dyn_ovr);
+        } else {
+            build_full_network(net, zone_info, cfg, sim_cfg.dt, true,
+                              &dyn_ovr, "default", true);
+        }
         StdMasks masks = build_std_masks(net, zone_info);
 
         // Reseed per-thread
@@ -741,11 +750,33 @@ int main(int argc, char** argv) {
     int n_workers = 8;
     std::string output_dir = "";
 
+    std::string snapshot_path = "";
+    bool no_snapshot = false;
+    bool verify_only = false;
+    std::string verify_output = "";
+    std::string data_dir_override = "";
+
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) == "--arms" && i + 1 < argc) arms = argv[++i];
         else if (std::string(argv[i]) == "--n-workers" && i + 1 < argc) n_workers = std::atoi(argv[++i]);
         else if (std::string(argv[i]) == "--output-dir" && i + 1 < argc) output_dir = argv[++i];
+        else if (std::string(argv[i]) == "--snapshot" && i + 1 < argc) snapshot_path = argv[++i];
+        else if (std::string(argv[i]) == "--no-snapshot") no_snapshot = true;
+        else if (std::string(argv[i]) == "--verify-only") verify_only = true;
+        else if (std::string(argv[i]) == "--verify-output" && i + 1 < argc) verify_output = argv[++i];
+        else if (std::string(argv[i]) == "--samples-per-digit" && i + 1 < argc) SAMPLES_PER_DIGIT = std::atoi(argv[++i]);
+        else if (std::string(argv[i]) == "--data-dir" && i + 1 < argc) data_dir_override = argv[++i];
     }
+
+    // Default: use network_snapshot.npz next to the binary if it exists
+    if (snapshot_path.empty() && !no_snapshot) {
+        fs::path default_snap = fs::path(argv[0]).parent_path() / "network_snapshot.npz";
+        if (fs::exists(default_snap)) {
+            snapshot_path = default_snap.string();
+            printf("  Using default snapshot: %s\n", snapshot_path.c_str());
+        }
+    }
+    g_snapshot_path = snapshot_path;
 
     #ifdef _OPENMP
     omp_set_num_threads(n_workers);
@@ -755,7 +786,8 @@ int main(int argc, char** argv) {
     fs::path exe_dir = fs::path(argv[0]).parent_path();
     fs::path base_dir = exe_dir.parent_path();
     if (base_dir.empty()) base_dir = ".";
-    std::string data_dir = (base_dir / "data").string();
+    std::string data_dir = data_dir_override.empty()
+        ? (base_dir / "data").string() : data_dir_override;
     if (output_dir.empty()) {
         output_dir = (base_dir / "results" / "classification_adaptation_sweep").string();
     }
@@ -774,6 +806,10 @@ int main(int argc, char** argv) {
     printf("  Workers: %d\n", n_workers);
     printf("  Readout: Flat Ridge (all %.0fms bins concatenated)\n", BIN_MS);
     printf("  CV: 60/40 StratifiedShuffleSplit x %d repeats\n", N_SPLIT_REPEATS);
+    if (!g_snapshot_path.empty()) {
+        printf("  SNAPSHOT: %s\n", g_snapshot_path.c_str());
+        printf("  (Network loaded from Python export — RNG-independent)\n");
+    }
     printf("======================================================================\n");
 
     // 1. Load audio
@@ -863,6 +899,90 @@ int main(int argc, char** argv) {
     printf("  Rate: %.1f Hz -> calibration target\n", target_rate_hz);
     printf("  Classification: %.1f%% (gap=%+.1fpp %s)\n",
            bl_cls.accuracy * 100, bl_stats.gap_pp, bl_stats.stars.c_str());
+
+    // Print fingerprint for verification against Python export
+    if (!g_snapshot_path.empty()) {
+        SphericalNetwork verify_net;
+        ZoneInfo verify_zone;
+        load_network_snapshot(verify_net, verify_zone, g_snapshot_path, sim_cfg.dt, true);
+        apply_dynamical_overrides(verify_net, verify_zone, sim_cfg.dt, lhs021_ovr);
+        print_network_fingerprint(verify_net, verify_zone);
+    }
+
+    // --verify-only: dump per-sample stats and exit
+    if (verify_only) {
+        std::string vout = verify_output.empty() ? "verify_cpp.json" : verify_output;
+        FILE* f = fopen(vout.c_str(), "w");
+        if (!f) { fprintf(stderr, "Cannot open %s\n", vout.c_str()); return 1; }
+
+        fprintf(f, "{\n");
+        fprintf(f, "  \"n_samples\": %d,\n", n_samples);
+        fprintf(f, "  \"n_reservoir\": %d,\n", bl_res.n_reservoir);
+        fprintf(f, "  \"mean_firing_rate_hz\": %.10f,\n", target_rate_hz);
+        fprintf(f, "  \"classification_accuracy\": %.10f,\n", bl_cls.accuracy);
+        fprintf(f, "  \"classification_accuracy_std\": %.10f,\n", bl_cls.accuracy_std);
+        fprintf(f, "  \"per_repeat_accuracy\": [");
+        for (int r = 0; r < (int)bl_cls.per_repeat_accuracy.size(); r++) {
+            if (r > 0) fprintf(f, ", ");
+            fprintf(f, "%.10f", bl_cls.per_repeat_accuracy[r]);
+        }
+        fprintf(f, "],\n");
+
+        // Per-sample spike counts
+        fprintf(f, "  \"per_sample_spikes\": [");
+        for (int i = 0; i < n_samples; i++) {
+            if (i > 0) fprintf(f, ", ");
+            fprintf(f, "%.1f", bl_res.total_spikes[i]);
+        }
+        fprintf(f, "],\n");
+
+        // Per-sample firing rates
+        fprintf(f, "  \"per_sample_rate_hz\": [");
+        for (int i = 0; i < n_samples; i++) {
+            if (i > 0) fprintf(f, ", ");
+            fprintf(f, "%.6f", bl_res.total_spikes[i] / (bl_res.n_reservoir * trial_dur_s));
+        }
+        fprintf(f, "],\n");
+
+        // Per-sample ISI CVs
+        fprintf(f, "  \"per_sample_isi_cv\": [");
+        for (int i = 0; i < n_samples; i++) {
+            if (i > 0) fprintf(f, ", ");
+            fprintf(f, "%.6f", bl_res.isi_cvs[i]);
+        }
+        fprintf(f, "],\n");
+
+        // Per-sample digits
+        fprintf(f, "  \"per_sample_digit\": [");
+        for (int i = 0; i < n_samples; i++) {
+            if (i > 0) fprintf(f, ", ");
+            fprintf(f, "%d", bl_res.digits[i]);
+        }
+        fprintf(f, "],\n");
+
+        // Per-sample adaptation at stim end
+        fprintf(f, "  \"per_sample_adapt_stim_end\": [");
+        for (int i = 0; i < n_samples; i++) {
+            if (i > 0) fprintf(f, ", ");
+            fprintf(f, "%.6f", bl_res.adapt_stim_ends[i]);
+        }
+        fprintf(f, "],\n");
+
+        // Per-sample filenames
+        fprintf(f, "  \"per_sample_filename\": [");
+        for (int i = 0; i < n_samples; i++) {
+            if (i > 0) fprintf(f, ", ");
+            fprintf(f, "\"%s\"", samples[i].filename.c_str());
+        }
+        fprintf(f, "]\n");
+
+        fprintf(f, "}\n");
+        fclose(f);
+
+        printf("\n  Verify-only: wrote %d-sample stats to %s\n", n_samples, vout.c_str());
+        printf("  Total time: %.1fs\n", now_seconds() - total_start);
+        return 0;
+    }
 
     // Baseline JSON
     char bl_json_buf[2048];
