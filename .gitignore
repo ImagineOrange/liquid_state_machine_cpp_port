@@ -2,6 +2,7 @@
 data/
 cls_sweep
 notes
+compile_commands.json
 
 # Executables & object files
 *.o
