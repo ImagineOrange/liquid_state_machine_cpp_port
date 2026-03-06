@@ -1,5 +1,6 @@
 # Custom
 data/
+cls_sweep
 
 # Executables & object files
 *.o
