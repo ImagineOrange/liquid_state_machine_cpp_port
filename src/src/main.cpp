@@ -30,7 +30,8 @@ static const int N_DIGITS = 5;
 static const double BIN_MS = 20.0;
 static const double POST_STIM_MS = 200.0;
 static int SAMPLES_PER_DIGIT = 500;
-static const int N_SPLIT_REPEATS = 5;
+static const int N_CV_REPEATS = 5;
+static const int N_CV_FOLDS = 5;
 static const std::vector<double> RIDGE_ALPHAS = {0.01, 0.1, 1.0, 10.0, 100.0, 1000.0};
 static const int SEED = 42;
 static const int SAMPLE_LOAD_SEED = 42;
@@ -434,7 +435,7 @@ calibrate_stimulus_current(NetworkConfig cfg,
         sim_cfg.stimulus_current = initial_guess;
         double rate = measure_rate(cfg, cal_samples, dyn_ovr, sim_cfg, n_workers);
         log.push_back({iteration, initial_guess, rate});
-        printf("      cal[%d] stim=%.4f -> %.1f Hz (cached)\n", iteration, initial_guess, rate);
+        // (calibration iteration logged silently)
         iteration++;
         if (std::abs(rate - target_rate) <= RATE_TOLERANCE_HZ)
             return {initial_guess, rate, log};
@@ -449,7 +450,7 @@ calibrate_stimulus_current(NetworkConfig cfg,
         sim_cfg.stimulus_current = mid;
         double rate = measure_rate(cfg, cal_samples, dyn_ovr, sim_cfg, n_workers);
         log.push_back({iteration, mid, rate});
-        printf("      cal[%d] stim=%.4f -> %.1f Hz\n", iteration, mid, rate);
+        // (calibration iteration logged silently)
 
         if (std::abs(rate - target_rate) <= RATE_TOLERANCE_HZ)
             return {mid, rate, log};
@@ -495,14 +496,15 @@ static ClassifyResult classify_flat_ridge(const std::vector<Mat>& bins_list,
     std::vector<double> repeat_accs;
     std::vector<std::vector<int>> last_cm;
 
-    for (int rep = 0; rep < N_SPLIT_REPEATS; rep++) {
-        auto split = stratified_shuffle_split(y, 0.4, SEED + rep);
+    for (int rep = 0; rep < N_CV_REPEATS; rep++) {
+        auto folds = cls::stratified_kfold(y, N_CV_FOLDS, SEED + rep);
 
-        double best_acc = -1;
-        std::vector<int> best_preds;
+        double rep_correct = 0;
+        int rep_total = 0;
 
-        for (double alpha : RIDGE_ALPHAS) {
-            // Extract train/test
+        for (int f = 0; f < N_CV_FOLDS; f++) {
+            auto& split = folds[f];
+
             Mat X_train((int)split.train.size(), n_features);
             std::vector<int> y_train(split.train.size());
             for (int i = 0; i < (int)split.train.size(); i++) {
@@ -512,35 +514,46 @@ static ClassifyResult classify_flat_ridge(const std::vector<Mat>& bins_list,
             }
 
             Mat X_test((int)split.test.size(), n_features);
-            std::vector<int> y_test(split.test.size());
+            std::vector<int> y_test_vec(split.test.size());
             for (int i = 0; i < (int)split.test.size(); i++) {
                 for (int j = 0; j < n_features; j++)
                     X_test(i, j) = X_flat(split.test[i], j);
-                y_test[i] = y[split.test[i]];
+                y_test_vec[i] = y[split.test[i]];
             }
 
-            StandardScaler scaler;
+            cls::StandardScaler scaler;
             X_train = scaler.fit_transform(X_train);
             X_test = scaler.transform(X_test);
-            nan_to_num(X_train);
-            nan_to_num(X_test);
+            cls::nan_to_num(X_train);
+            cls::nan_to_num(X_test);
 
-            auto rr = ridge_classify(X_train, y_train, X_test, y_test,
-                                      alpha, DEFAULT_DIGITS);
-            if (rr.accuracy > best_acc) {
-                best_acc = rr.accuracy;
-                best_preds = rr.predictions;
+            auto fold_ctx = cls::ridge_fold_prepare(X_train, y_train, X_test, y_test_vec,
+                                                      DEFAULT_DIGITS);
+
+            double best_acc = -1;
+            std::vector<int> best_preds;
+
+            for (double alpha : RIDGE_ALPHAS) {
+                auto rr = cls::ridge_fold_solve(fold_ctx, X_test, y_test_vec, alpha);
+                if (rr.accuracy > best_acc) {
+                    best_acc = rr.accuracy;
+                    best_preds = rr.predictions;
+                }
             }
+
+            int n_test = (int)split.test.size();
+            int correct = 0;
+            std::vector<int> y_test_for_cm(n_test);
+            for (int i = 0; i < n_test; i++) {
+                y_test_for_cm[i] = y[split.test[i]];
+                if (best_preds[i] == y_test_for_cm[i]) correct++;
+            }
+            rep_correct += correct;
+            rep_total += n_test;
+            last_cm = cls::confusion_matrix(y_test_for_cm, best_preds, DEFAULT_DIGITS);
         }
 
-        repeat_accs.push_back(best_acc);
-        last_cm = confusion_matrix(
-            std::vector<int>(split.test.size()),
-            best_preds, DEFAULT_DIGITS);
-        // Actually build y_test for cm
-        std::vector<int> y_test_for_cm(split.test.size());
-        for (int i = 0; i < (int)split.test.size(); i++) y_test_for_cm[i] = y[split.test[i]];
-        last_cm = confusion_matrix(y_test_for_cm, best_preds, DEFAULT_DIGITS);
+        repeat_accs.push_back(rep_correct / rep_total);
     }
 
     double mean_acc = 0, std_acc = 0;
@@ -569,11 +582,14 @@ static std::vector<double> classify_per_bin(const std::vector<Mat>& bins_list,
         }
 
         std::vector<double> rep_accs;
-        for (int rep = 0; rep < N_SPLIT_REPEATS; rep++) {
-            auto split = stratified_shuffle_split(y, 0.4, SEED + rep);
-            double best_acc = -1;
+        for (int rep = 0; rep < N_CV_REPEATS; rep++) {
+            auto folds = cls::stratified_kfold(y, N_CV_FOLDS, SEED + rep);
+            double rep_correct = 0;
+            int rep_total = 0;
 
-            for (double alpha : RIDGE_ALPHAS) {
+            for (int f = 0; f < N_CV_FOLDS; f++) {
+                auto& split = folds[f];
+
                 Mat Xtr((int)split.train.size(), n_reservoir);
                 std::vector<int> ytr(split.train.size());
                 for (int i = 0; i < (int)split.train.size(); i++) {
@@ -586,15 +602,31 @@ static std::vector<double> classify_per_bin(const std::vector<Mat>& bins_list,
                     for (int j = 0; j < n_reservoir; j++) Xte(i, j) = X_bin(split.test[i], j);
                     yte[i] = y[split.test[i]];
                 }
-                StandardScaler sc;
+                cls::StandardScaler sc;
                 Xtr = sc.fit_transform(Xtr);
                 Xte = sc.transform(Xte);
-                nan_to_num(Xtr);
-                nan_to_num(Xte);
-                auto rr = ridge_classify(Xtr, ytr, Xte, yte, alpha, DEFAULT_DIGITS);
-                if (rr.accuracy > best_acc) best_acc = rr.accuracy;
+                cls::nan_to_num(Xtr);
+                cls::nan_to_num(Xte);
+
+                auto fold_ctx = cls::ridge_fold_prepare(Xtr, ytr, Xte, yte, DEFAULT_DIGITS);
+
+                double best_acc = -1;
+                std::vector<int> best_preds;
+
+                for (double alpha : RIDGE_ALPHAS) {
+                    auto rr = cls::ridge_fold_solve(fold_ctx, Xte, yte, alpha);
+                    if (rr.accuracy > best_acc) {
+                        best_acc = rr.accuracy;
+                        best_preds = rr.predictions;
+                    }
+                }
+                int n_test = (int)split.test.size();
+                for (int i = 0; i < n_test; i++) {
+                    if (best_preds[i] == y[split.test[i]]) rep_correct++;
+                }
+                rep_total += n_test;
             }
-            rep_accs.push_back(best_acc);
+            rep_accs.push_back(rep_correct / rep_total);
         }
         double s = 0;
         for (double a : rep_accs) s += a;
@@ -805,7 +837,7 @@ int main(int argc, char** argv) {
     printf("  Samples: %d per digit = %d total\n", SAMPLES_PER_DIGIT, SAMPLES_PER_DIGIT * N_DIGITS);
     printf("  Workers: %d\n", n_workers);
     printf("  Readout: Flat Ridge (all %.0fms bins concatenated)\n", BIN_MS);
-    printf("  CV: 60/40 StratifiedShuffleSplit x %d repeats\n", N_SPLIT_REPEATS);
+    printf("  CV: StratifiedKFold(%d) x %d repeats\n", N_CV_FOLDS, N_CV_REPEATS);
     if (!g_snapshot_path.empty()) {
         printf("  SNAPSHOT: %s\n", g_snapshot_path.c_str());
         printf("  (Network loaded from Python export — RNG-independent)\n");
@@ -1010,7 +1042,6 @@ int main(int argc, char** argv) {
         double tau_val = pt.adapt_tau;
 
         double gp_start = now_seconds();
-        double elapsed_total = gp_start - sweep_start;
 
         std::string eta_str = "calculating...";
         if (!grid_point_times.empty()) {
@@ -1025,11 +1056,8 @@ int main(int argc, char** argv) {
             eta_str = buf;
         }
 
-        printf("\n____________________________________________________________\n");
-        printf("  [%s] inc=%.4f, tau=%.1fms  (%d/%d)  |  ETA: %s\n",
-               pt.source.c_str(), inc_val, tau_val, pt_num + 1, n_grid, eta_str.c_str());
-        printf("  Elapsed: %.1fh\n", elapsed_total / 3600.0);
-        printf("____________________________________________________________\n");
+        printf("\n  [%d/%d] inc=%.4f, tau=%.1fms  |  ETA: %s\n",
+               pt_num + 1, n_grid, inc_val, tau_val, eta_str.c_str());
 
         DynamicalOverrides dyn_ovr;
         dyn_ovr.shell_core_mult = LHS021_SHELL_CORE_MULT;
@@ -1050,7 +1078,6 @@ int main(int argc, char** argv) {
             hi = std::min(hi, prev_stim * 3.0);
         }
 
-        printf("    Calibrating (target %.1f Hz)...\n", target_rate_hz);
         auto [matched_stim, cal_rate, cal_log] =
             calibrate_stimulus_current(base_cfg, dyn_ovr, cal_samples, cal_sim,
                                        n_workers, target_rate_hz, lo, hi,
@@ -1058,14 +1085,13 @@ int main(int argc, char** argv) {
 
         // Retry if missed
         if (std::abs(cal_rate - target_rate_hz) > RATE_TOLERANCE_HZ) {
-            printf("    Retrying with global bounds...\n");
             std::tie(matched_stim, cal_rate, cal_log) =
                 calibrate_stimulus_current(base_cfg, dyn_ovr, cal_samples, cal_sim,
                                            n_workers, target_rate_hz);
         }
 
         if (pt.tau_idx >= 0) last_stim_by_tau[pt.tau_idx] = matched_stim;
-        printf("    Matched: stim=%.4f -> %.1f Hz\n", matched_stim, cal_rate);
+        printf("    Calibrated: stim=%.4f -> %.1f Hz\n", matched_stim, cal_rate);
 
         // Full evaluation
         SimConfig eval_sim = sim_cfg;
@@ -1087,7 +1113,7 @@ int main(int argc, char** argv) {
         }
         rate_std = std::sqrt(rate_std / n_samples);
 
-        printf("    Sim: %.0fs, Rate: %.1f +/- %.1f Hz\n", sim_time, rate_mean, rate_std);
+        // Results printed after classification below
 
         // Classification
         int eval_n_bins = 0;
@@ -1099,8 +1125,7 @@ int main(int argc, char** argv) {
                                            bsa_result.per_repeat_accuracy,
                                            cls_res.accuracy, bsa_result.accuracy);
 
-        printf("    Classification: %.1f%% (gap=%+.1fpp %s)\n",
-               cls_res.accuracy * 100, stats.gap_pp, stats.stars.c_str());
+        // (printed below after all metrics computed)
 
         // ISI stats
         double isi_cv_mean = 0;
@@ -1121,8 +1146,9 @@ int main(int argc, char** argv) {
         // Per-bin accuracy
         auto per_bin_acc = classify_per_bin(res.res_bins_list, y, eval_n_bins, res.n_reservoir);
 
-        printf("    ISI CV: %.3f, g_adapt: %.4f, PR: %.4f\n",
-               isi_cv_mean, adapt_mean, pr_mean);
+        printf("    Rate: %.1f Hz | Acc: %.1f%% (gap=%+.1fpp %s) | ISI CV: %.3f | PR: %.4f\n",
+               rate_mean, cls_res.accuracy * 100, stats.gap_pp, stats.stars.c_str(),
+               isi_cv_mean, pr_mean);
 
         // Build JSON for this grid point
         std::ostringstream oss;

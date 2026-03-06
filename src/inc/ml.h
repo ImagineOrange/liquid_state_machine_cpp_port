@@ -28,6 +28,37 @@ RidgeResult ridge_classify(const Mat& X_train, const std::vector<int>& y_train,
                            const Mat& X_test, const std::vector<int>& y_test,
                            double alpha, const std::vector<int>& classes);
 
+// Pre-computed SVD for reuse across multiple alpha values
+struct SvdDecomp {
+    std::vector<double> S;
+    Mat U;
+    Mat Vt;
+};
+
+SvdDecomp svd_decompose(const Mat& X_train);
+
+RidgeResult ridge_classify_from_svd(const SvdDecomp& svd,
+                                     const Mat& X_train, const std::vector<int>& y_train,
+                                     const Mat& X_test, const std::vector<int>& y_test,
+                                     double alpha, const std::vector<int>& classes);
+
+// Pre-computed per-fold context: SVD + U^T*Y_bin, for fast multi-alpha sweeps
+struct RidgeFoldContext {
+    SvdDecomp svd;
+    Mat UtY;         // (k x n_classes) = U^T * Y_bin
+    int p;           // number of features
+    int n_test;
+    std::vector<int> classes;
+};
+
+RidgeFoldContext ridge_fold_prepare(const Mat& X_train, const std::vector<int>& y_train,
+                                    const Mat& X_test, const std::vector<int>& y_test,
+                                    const std::vector<int>& classes);
+
+RidgeResult ridge_fold_solve(const RidgeFoldContext& ctx,
+                              const Mat& X_test, const std::vector<int>& y_test,
+                              double alpha);
+
 // Accuracy score
 double accuracy_score(const std::vector<int>& y_true, const std::vector<int>& y_pred);
 
@@ -44,6 +75,10 @@ struct SplitIndices {
 
 SplitIndices stratified_shuffle_split(const std::vector<int>& y, double test_size,
                                        uint64_t random_state);
+
+// StratifiedKFold: returns k folds where each sample appears in test exactly once
+std::vector<SplitIndices> stratified_kfold(const std::vector<int>& y, int n_splits,
+                                            uint64_t random_state);
 
 // Paired t-test
 struct PairedStats {
