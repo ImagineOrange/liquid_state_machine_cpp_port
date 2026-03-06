@@ -36,8 +36,10 @@ TARGET = cls_sweep
 
 all: $(TARGET)
 
+# Build target: link, then clean up .o files
 $(TARGET): $(OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+	rm -f $(OBJS)
 
 # Compile rule: include headers from `inc/`
 $(SRCDIR)/%.o: $(SRCDIR)/%.cpp
