@@ -26,3 +26,9 @@ compile_commands.json
 # *.dSYM/
 # *.map
 
+# mac stuff
+.DS_Store
+
+# claude
+.claude/
+
