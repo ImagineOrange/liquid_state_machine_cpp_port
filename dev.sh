@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
 set -e
 
+WORKSPACE_PATH=$(pwd)
 IMAGE_NAME="cls-sweep-cpp"
 CONTAINER_NAME="cls-sweep-dev"
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
 # Build the Docker image
 echo "Building Docker image '${IMAGE_NAME}'..."
-docker build -t "${IMAGE_NAME}" "${SCRIPT_DIR}"
-
-# Remove any existing container with the same name
-docker rm -f "${CONTAINER_NAME}" 2>/dev/null || true
+docker build -f docker/Dockerfile -t "${IMAGE_NAME}" .
 
 # Run the container interactively
 # Mount the project directory so edits persist on host
@@ -27,7 +23,7 @@ echo ""
 
 exec docker run -it --rm \
     --name "${CONTAINER_NAME}" \
-    -v "${SCRIPT_DIR}:/workspace" \
+    -v "${WORKSPACE_PATH}:/workspace" \
     -w /workspace \
     "${IMAGE_NAME}" \
     /bin/bash

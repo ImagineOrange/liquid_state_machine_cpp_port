@@ -1,0 +1,27 @@
+# Custom
+data/
+cls_sweep
+notes
+
+# Executables & object files
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.exe
+*.out
+
+# Makefile outputs
+*.d
+*.d.*
+*.pp
+*.s
+*.s.*
+
+# Debug info
+# *.pdb
+# *.dSYM/
+# *.map
+
