@@ -50,28 +50,34 @@ void nan_to_num(Mat& X) {
     }
 }
 
-RidgeResult ridge_classify(const Mat& X_train, const std::vector<int>& y_train,
-                           const Mat& X_test, const std::vector<int>& y_test,
-                           double alpha, const std::vector<int>& classes) {
+SvdDecomp svd_decompose(const Mat& X_train) {
+    SvdDecomp decomp;
+    svd_econ(X_train, decomp.S, decomp.U, decomp.Vt);
+    return decomp;
+}
+
+RidgeResult ridge_classify_from_svd(const SvdDecomp& svd,
+                                     const Mat& X_train, const std::vector<int>& y_train,
+                                     const Mat& X_test, const std::vector<int>& y_test,
+                                     double alpha, const std::vector<int>& classes) {
+    auto ctx = ridge_fold_prepare(X_train, y_train, X_test, y_test, classes);
+    return ridge_fold_solve(ctx, X_test, y_test, alpha);
+}
+
+RidgeFoldContext ridge_fold_prepare(const Mat& X_train, const std::vector<int>& y_train,
+                                    const Mat& X_test, const std::vector<int>& y_test,
+                                    const std::vector<int>& classes) {
+    RidgeFoldContext ctx;
+    ctx.svd = svd_decompose(X_train);
+    ctx.p = X_train.cols;
+    ctx.n_test = X_test.rows;
+    ctx.classes = classes;
+
     int n_train = X_train.rows;
-    int n_test = X_test.rows;
-    int p = X_train.cols;
     int n_classes = (int)classes.size();
+    int k = (int)ctx.svd.S.size();
 
-    // SVD of X_train
-    std::vector<double> S;
-    Mat U, Vt;
-    svd_econ(X_train, S, U, Vt);
-    int k = (int)S.size();
-
-    // Compute shrinkage factors: d_i = s_i / (s_i^2 + alpha)
-    std::vector<double> d(k);
-    for (int i = 0; i < k; i++) {
-        d[i] = S[i] / (S[i] * S[i] + alpha);
-    }
-
-    // For multiclass: create binary targets {-1, +1}
-    // Y_bin is n_train x n_classes
+    // Build binary targets Y_bin (n_train x n_classes)
     Mat Y_bin(n_train, n_classes, -1.0);
     std::map<int, int> class_to_idx;
     for (int c = 0; c < n_classes; c++) class_to_idx[classes[c]] = c;
@@ -82,43 +88,50 @@ RidgeResult ridge_classify(const Mat& X_train, const std::vector<int>& y_train,
         }
     }
 
-    // W = V * diag(d) * U^T * Y_bin
-    // First: Z = U^T * Y_bin  (k x n_classes)
-    Mat Z(k, n_classes, 0.0);
+    // UtY = U^T * Y_bin  (k x n_classes) via BLAS
+    ctx.UtY = Mat(k, n_classes, 0.0);
+    cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                k, n_classes, n_train,
+                1.0, ctx.svd.U.data.data(), k,
+                Y_bin.data.data(), n_classes,
+                0.0, ctx.UtY.data.data(), n_classes);
+
+    return ctx;
+}
+
+RidgeResult ridge_fold_solve(const RidgeFoldContext& ctx,
+                              const Mat& X_test, const std::vector<int>& y_test,
+                              double alpha) {
+    int k = (int)ctx.svd.S.size();
+    int p = ctx.p;
+    int n_test = ctx.n_test;
+    int n_classes = (int)ctx.classes.size();
+
+    // Z = diag(d) * UtY  (k x n_classes) — apply shrinkage to precomputed product
+    Mat Z(k, n_classes);
     for (int i = 0; i < k; i++) {
+        double di = ctx.svd.S[i] / (ctx.svd.S[i] * ctx.svd.S[i] + alpha);
         for (int c = 0; c < n_classes; c++) {
-            double s = 0;
-            for (int j = 0; j < n_train; j++) {
-                s += U(j, i) * Y_bin(j, c);
-            }
-            Z(i, c) = s * d[i]; // incorporate shrinkage
+            Z(i, c) = ctx.UtY(i, c) * di;
         }
     }
 
-    // W = Vt^T * Z  = V * Z  (p x n_classes)
-    // Vt is (k x p), so V = Vt^T is (p x k)
+    // W = Vt^T * Z  (p x n_classes) via BLAS
+    // Vt is (k x p) row-major, transposed gives (p x k)
     Mat W(p, n_classes, 0.0);
-    for (int j = 0; j < p; j++) {
-        for (int c = 0; c < n_classes; c++) {
-            double s = 0;
-            for (int i = 0; i < k; i++) {
-                s += Vt(i, j) * Z(i, c); // Vt^T[j,i] = Vt[i,j]
-            }
-            W(j, c) = s;
-        }
-    }
+    cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                p, n_classes, k,
+                1.0, ctx.svd.Vt.data.data(), p,
+                Z.data.data(), n_classes,
+                0.0, W.data.data(), n_classes);
 
-    // Decision function: X_test * W  (n_test x n_classes)
+    // decisions = X_test * W  (n_test x n_classes) via BLAS
     Mat decisions(n_test, n_classes, 0.0);
-    for (int i = 0; i < n_test; i++) {
-        for (int c = 0; c < n_classes; c++) {
-            double s = 0;
-            for (int j = 0; j < p; j++) {
-                s += X_test(i, j) * W(j, c);
-            }
-            decisions(i, c) = s;
-        }
-    }
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                n_test, n_classes, p,
+                1.0, X_test.data.data(), p,
+                W.data.data(), n_classes,
+                0.0, decisions.data.data(), n_classes);
 
     // Predictions: argmax of decision function
     RidgeResult result;
@@ -134,13 +147,20 @@ RidgeResult ridge_classify(const Mat& X_train, const std::vector<int>& y_train,
                 best_c = c;
             }
         }
-        result.predictions[i] = classes[best_c];
+        result.predictions[i] = ctx.classes[best_c];
     }
 
     result.accuracy = accuracy_score(y_test,
                                       std::vector<int>(result.predictions.begin(),
                                                        result.predictions.begin() + n_test));
     return result;
+}
+
+RidgeResult ridge_classify(const Mat& X_train, const std::vector<int>& y_train,
+                           const Mat& X_test, const std::vector<int>& y_test,
+                           double alpha, const std::vector<int>& classes) {
+    auto ctx = ridge_fold_prepare(X_train, y_train, X_test, y_test, classes);
+    return ridge_fold_solve(ctx, X_test, y_test, alpha);
 }
 
 double accuracy_score(const std::vector<int>& y_true, const std::vector<int>& y_pred) {
@@ -208,6 +228,43 @@ SplitIndices stratified_shuffle_split(const std::vector<int>& y, double test_siz
     }
 
     return result;
+}
+
+std::vector<SplitIndices> stratified_kfold(const std::vector<int>& y, int n_splits,
+                                            uint64_t random_state) {
+    int n = (int)y.size();
+    std::mt19937_64 rng(random_state);
+
+    // Group indices by class
+    std::map<int, std::vector<int>> by_class;
+    for (int i = 0; i < n; i++) by_class[y[i]].push_back(i);
+
+    // Shuffle within each class
+    for (auto& [cls, indices] : by_class) {
+        for (int i = (int)indices.size() - 1; i > 0; i--) {
+            std::uniform_int_distribution<int> dist(0, i);
+            std::swap(indices[i], indices[dist(rng)]);
+        }
+    }
+
+    // Assign each sample to a fold, round-robin within each class
+    std::vector<int> fold_id(n, 0);
+    for (auto& [cls, indices] : by_class) {
+        for (int i = 0; i < (int)indices.size(); i++) {
+            fold_id[indices[i]] = i % n_splits;
+        }
+    }
+
+    // Build splits
+    std::vector<SplitIndices> splits(n_splits);
+    for (int f = 0; f < n_splits; f++) {
+        for (int i = 0; i < n; i++) {
+            if (fold_id[i] == f) splits[f].test.push_back(i);
+            else splits[f].train.push_back(i);
+        }
+    }
+
+    return splits;
 }
 
 // Student's t-distribution CDF approximation (Abramowitz & Stegun)

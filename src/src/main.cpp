@@ -30,7 +30,8 @@ static const int N_DIGITS = 5;
 static const double BIN_MS = 20.0;
 static const double POST_STIM_MS = 200.0;
 static int SAMPLES_PER_DIGIT = 500;
-static const int N_SPLIT_REPEATS = 5;
+static const int N_CV_REPEATS = 5;
+static const int N_CV_FOLDS = 5;
 static const std::vector<double> RIDGE_ALPHAS = {0.01, 0.1, 1.0, 10.0, 100.0, 1000.0};
 static const int SEED = 42;
 static const int SAMPLE_LOAD_SEED = 42;
@@ -63,6 +64,362 @@ static const std::vector<double> UNIFIED_TAU = {
     30.0, 54.7, 99.6, 181.0, 330.6, 500.0, 602.4,
     1098.0, 2000.0, 3000.0, 3500.0, 4000.0, 5000.0,
 };
+
+// Forward declarations
+static std::vector<AudioSample> load_audio_samples(
+    const std::string& data_dir, const std::vector<int>& digits,
+    int samples_per_digit, int random_seed);
+
+// ============================================================
+// INPUT NEURON GRID SEARCH
+// ============================================================
+static const std::vector<double> IG_STIM     = {0.04, 0.08, 0.12, 0.20, 0.40, 0.88};
+static const std::vector<double> IG_TAU_E    = {0.5, 1.0, 2.0, 3.0, 5.0};
+static const std::vector<double> IG_ADAPT    = {0.0, 0.3, 0.8, 1.5, 3.0};
+static const std::vector<double> IG_STD_U    = {0.0, 0.15, 0.30, 0.50};
+static const int IG_SAMPLES_PER_DIGIT = 6;
+static const double IG_INPUT_STD_TAU = 500.0;
+
+struct InputGridPoint {
+    double stim_current, input_tau_e, input_adapt_inc, input_std_u;
+    int idx;
+};
+
+struct InputGridMetrics {
+    double mean_rate_hz;
+    double mean_isi_cv;
+    double mean_refrac_frac;
+    double mean_mod_depth;
+    double spike_bsa_r_10ms;
+    double spike_bsa_r_20ms;
+    double spike_bsa_r_50ms;
+    int n_active_neurons;
+};
+
+static double pearson_r_vec(const std::vector<double>& x, const std::vector<double>& y) {
+    int n = (int)std::min(x.size(), y.size());
+    if (n < 3) return 0.0;
+    double mx = 0, my = 0;
+    for (int i = 0; i < n; i++) { mx += x[i]; my += y[i]; }
+    mx /= n; my /= n;
+    double sxx = 0, syy = 0, sxy = 0;
+    for (int i = 0; i < n; i++) {
+        double dx = x[i] - mx, dy = y[i] - my;
+        sxx += dx*dx; syy += dy*dy; sxy += dx*dy;
+    }
+    double denom = std::sqrt(sxx * syy);
+    return denom > 1e-12 ? sxy / denom : 0.0;
+}
+
+static std::vector<InputGridPoint> build_input_grid() {
+    std::vector<InputGridPoint> pts;
+    int idx = 0;
+    for (double stim : IG_STIM)
+        for (double tau : IG_TAU_E)
+            for (double adapt : IG_ADAPT)
+                for (double std_u : IG_STD_U)
+                    pts.push_back({stim, tau, adapt, std_u, idx++});
+    return pts;
+}
+
+// Compute per-input-neuron metrics from one simulation's activity_record
+static InputGridMetrics compute_input_metrics(
+    const RunResult& result,
+    const ZoneInfo& zone_info,
+    const AudioSample& sample,
+    double dt, double stim_end_ms,
+    const double bin_windows_ms[3])  // {10, 20, 50}
+{
+    InputGridMetrics m{};
+    std::set<int> input_set(zone_info.input_neuron_indices.begin(),
+                             zone_info.input_neuron_indices.end());
+    int n_steps = (int)result.activity_record.size();
+
+    // 1. Collect per-input-neuron spike times
+    std::unordered_map<int, std::vector<double>> neuron_spikes;
+    for (int step = 0; step < n_steps; step++) {
+        double t = step * dt;
+        for (int nid : result.activity_record[step]) {
+            if (input_set.count(nid)) {
+                neuron_spikes[nid].push_back(t);
+            }
+        }
+    }
+
+    // 2. Build per-input-neuron BSA spike times
+    std::unordered_map<int, std::vector<double>> neuron_bsa;
+    for (size_t k = 0; k < sample.spike_times_ms.size(); k++) {
+        int fb = sample.freq_bin_indices[k];
+        auto mit = zone_info.input_neuron_mapping.find(fb);
+        if (mit != zone_info.input_neuron_mapping.end()) {
+            for (int nid : mit->second) {
+                neuron_bsa[nid].push_back(sample.spike_times_ms[k]);
+            }
+        }
+    }
+
+    // 3. Per-neuron metrics
+    double sum_rate = 0, sum_isi_cv = 0, sum_refrac = 0, sum_mod = 0;
+    double sum_r[3] = {0, 0, 0};
+    int n_with_isi = 0, n_active = 0, n_with_bsa = 0;
+
+    for (int nid : zone_info.input_neuron_indices) {
+        auto sit = neuron_spikes.find(nid);
+        if (sit == neuron_spikes.end() || sit->second.empty()) continue;
+        const auto& spk = sit->second;
+        n_active++;
+
+        // Firing rate (during stimulus period only)
+        int n_stim_spikes = 0;
+        for (double t : spk) if (t <= stim_end_ms) n_stim_spikes++;
+        double rate_hz = n_stim_spikes / (stim_end_ms / 1000.0);
+        sum_rate += rate_hz;
+
+        // ISI stats
+        std::vector<double> isis;
+        for (size_t i = 1; i < spk.size(); i++) {
+            if (spk[i] <= stim_end_ms) isis.push_back(spk[i] - spk[i-1]);
+        }
+        if (isis.size() >= 2) {
+            double mean_isi = 0;
+            for (double v : isis) mean_isi += v;
+            mean_isi /= isis.size();
+            double var = 0;
+            for (double v : isis) var += (v - mean_isi) * (v - mean_isi);
+            var /= isis.size();
+            double cv = std::sqrt(var) / std::max(mean_isi, 1e-9);
+            sum_isi_cv += cv;
+
+            // Refractory fraction (ISI <= 5.0 ms)
+            int n_ref = 0;
+            for (double v : isis) if (v <= 5.0) n_ref++;
+            sum_refrac += (double)n_ref / isis.size();
+
+            n_with_isi++;
+        }
+
+        // Rate modulation depth (20ms windows during stim)
+        {
+            int n_bins_mod = std::max(1, (int)(stim_end_ms / 20.0));
+            std::vector<double> rates_mod(n_bins_mod, 0.0);
+            for (double t : spk) {
+                if (t <= stim_end_ms) {
+                    int b = std::min((int)(t / 20.0), n_bins_mod - 1);
+                    rates_mod[b] += 1.0;
+                }
+            }
+            double max_r = *std::max_element(rates_mod.begin(), rates_mod.end());
+            double min_r = *std::min_element(rates_mod.begin(), rates_mod.end());
+            if (max_r > 0) sum_mod += (max_r - min_r) / max_r;
+        }
+
+        // Spike-BSA correlation at multiple windows
+        auto bit = neuron_bsa.find(nid);
+        if (bit != neuron_bsa.end() && !bit->second.empty()) {
+            n_with_bsa++;
+            for (int wi = 0; wi < 3; wi++) {
+                double win = bin_windows_ms[wi];
+                int n_bins = std::max(1, (int)(stim_end_ms / win));
+                std::vector<double> bsa_binned(n_bins, 0.0), spk_binned(n_bins, 0.0);
+                for (double t : bit->second) {
+                    if (t <= stim_end_ms) {
+                        int b = std::min((int)(t / win), n_bins - 1);
+                        bsa_binned[b] += 1.0;
+                    }
+                }
+                for (double t : spk) {
+                    if (t <= stim_end_ms) {
+                        int b = std::min((int)(t / win), n_bins - 1);
+                        spk_binned[b] += 1.0;
+                    }
+                }
+                sum_r[wi] += pearson_r_vec(bsa_binned, spk_binned);
+            }
+        }
+    }
+
+    m.n_active_neurons = n_active;
+    m.mean_rate_hz = n_active > 0 ? sum_rate / n_active : 0;
+    m.mean_isi_cv = n_with_isi > 0 ? sum_isi_cv / n_with_isi : 0;
+    m.mean_refrac_frac = n_with_isi > 0 ? sum_refrac / n_with_isi : 0;
+    m.mean_mod_depth = n_active > 0 ? sum_mod / n_active : 0;
+    m.spike_bsa_r_10ms = n_with_bsa > 0 ? sum_r[0] / n_with_bsa : 0;
+    m.spike_bsa_r_20ms = n_with_bsa > 0 ? sum_r[1] / n_with_bsa : 0;
+    m.spike_bsa_r_50ms = n_with_bsa > 0 ? sum_r[2] / n_with_bsa : 0;
+    return m;
+}
+
+static int run_input_grid(int argc, char** argv, const std::string& snapshot_path,
+                           const std::string& data_dir, int n_workers,
+                           const std::string& output_csv) {
+    printf("======================================================================\n");
+    printf("  INPUT NEURON REGIME GRID SEARCH\n");
+    printf("======================================================================\n");
+
+    auto grid = build_input_grid();
+    int n_grid = (int)grid.size();
+
+    // Load audio
+    printf("[1] Loading audio (%d per digit)...\n", IG_SAMPLES_PER_DIGIT);
+    auto samples = load_audio_samples(data_dir, DEFAULT_DIGITS,
+                                       IG_SAMPLES_PER_DIGIT, SAMPLE_LOAD_SEED);
+    int n_samples = (int)samples.size();
+    printf("  %d samples loaded\n", n_samples);
+
+    // Find max audio duration
+    double max_audio_ms = 0;
+    for (auto& s : samples) {
+        double mx = *std::max_element(s.spike_times_ms.begin(), s.spike_times_ms.end());
+        if (mx > max_audio_ms) max_audio_ms = mx;
+    }
+    max_audio_ms += 5.0;
+
+    // Pre-compute per-sample stim end times
+    std::vector<double> stim_ends(n_samples);
+    for (int i = 0; i < n_samples; i++) {
+        stim_ends[i] = *std::max_element(samples[i].spike_times_ms.begin(),
+                                          samples[i].spike_times_ms.end());
+    }
+
+    double bin_windows[3] = {10.0, 20.0, 50.0};
+
+    printf("[2] Running grid search: %d grid points x %d samples = %d sims\n",
+           n_grid, n_samples, n_grid * n_samples);
+    printf("    Axes: stim_current(%d) x tau_e(%d) x adapt_inc(%d) x std_u(%d)\n",
+           (int)IG_STIM.size(), (int)IG_TAU_E.size(),
+           (int)IG_ADAPT.size(), (int)IG_STD_U.size());
+    printf("    Workers: %d\n", n_workers);
+
+    // Open output CSV
+    FILE* csv = fopen(output_csv.c_str(), "w");
+    if (!csv) { fprintf(stderr, "Cannot open %s\n", output_csv.c_str()); return 1; }
+    fprintf(csv, "stim_current,input_tau_e,input_adapt_inc,input_std_u,"
+                 "mean_rate_hz,mean_isi_cv,mean_refrac_frac,mean_mod_depth,"
+                 "spike_bsa_r_10ms,spike_bsa_r_20ms,spike_bsa_r_50ms,"
+                 "n_active_neurons,composite_score\n");
+
+    double t_start = now_seconds();
+
+    for (int gp = 0; gp < n_grid; gp++) {
+        auto& pt = grid[gp];
+
+        // Accumulate metrics across samples
+        double sum_rate = 0, sum_cv = 0, sum_ref = 0, sum_mod = 0;
+        double sum_r10 = 0, sum_r20 = 0, sum_r50 = 0;
+        double sum_active = 0;
+
+        #pragma omp parallel num_threads(n_workers) \
+            reduction(+:sum_rate,sum_cv,sum_ref,sum_mod,sum_r10,sum_r20,sum_r50,sum_active)
+        {
+            // Each thread builds its own network with this grid point's params
+            SphericalNetwork net;
+            ZoneInfo zone_info;
+            if (!snapshot_path.empty()) {
+                load_network_snapshot(net, zone_info, snapshot_path, 0.1, true);
+                DynamicalOverrides dyn_ovr;
+                dyn_ovr.shell_core_mult = LHS021_SHELL_CORE_MULT;
+                dyn_ovr.core_core_mult = LHS021_CORE_CORE_MULT;
+                dyn_ovr.adapt_inc = LHS021_ADAPT_INC;
+                dyn_ovr.nmda_tau = FIXED_NMDA_TAU;
+                apply_dynamical_overrides(net, zone_info, 0.1, dyn_ovr);
+            } else {
+                NetworkConfig base_cfg = make_base_config();
+                base_cfg.lambda_connect = LHS021_LAMBDA_CONNECT;
+                DynamicalOverrides dyn_ovr;
+                dyn_ovr.shell_core_mult = LHS021_SHELL_CORE_MULT;
+                dyn_ovr.core_core_mult = LHS021_CORE_CORE_MULT;
+                dyn_ovr.adapt_inc = LHS021_ADAPT_INC;
+                dyn_ovr.nmda_tau = FIXED_NMDA_TAU;
+                build_full_network(net, zone_info, base_cfg, 0.1, true,
+                                  &dyn_ovr, "default", true);
+            }
+
+            // Apply input neuron overrides
+            for (int nid : zone_info.input_neuron_indices) {
+                net.tau_e[nid] = pt.input_tau_e;
+                net.adaptation_increment[nid] = pt.input_adapt_inc;
+            }
+            net.precompute_decay_factors(0.1);
+            StdMasks masks = build_std_masks(net, zone_info);
+
+            rng_seed(42 + (uint64_t)omp_get_thread_num() * 1000 + (uint64_t)getpid());
+
+            #pragma omp for schedule(dynamic, 1)
+            for (int si = 0; si < n_samples; si++) {
+                SimConfig sim;
+                sim.dt = 0.1;
+                sim.audio_duration_ms = max_audio_ms;
+                sim.post_stimulus_ms = POST_STIM_MS;
+                sim.stimulus_current = pt.stim_current;
+                sim.input_std_u = pt.input_std_u;
+                sim.input_std_tau_rec = IG_INPUT_STD_TAU;
+
+                auto result = run_sample_with_std(net, samples[si], zone_info, sim,
+                                                   STD_U, STD_TAU_REC, masks,
+                                                   stim_ends[si]);
+
+                auto m = compute_input_metrics(result, zone_info, samples[si],
+                                                sim.dt, stim_ends[si], bin_windows);
+
+                sum_rate += m.mean_rate_hz;
+                sum_cv += m.mean_isi_cv;
+                sum_ref += m.mean_refrac_frac;
+                sum_mod += m.mean_mod_depth;
+                sum_r10 += m.spike_bsa_r_10ms;
+                sum_r20 += m.spike_bsa_r_20ms;
+                sum_r50 += m.spike_bsa_r_50ms;
+                sum_active += m.n_active_neurons;
+            }
+        }
+
+        // Average across samples
+        double avg_rate = sum_rate / n_samples;
+        double avg_cv = sum_cv / n_samples;
+        double avg_ref = sum_ref / n_samples;
+        double avg_mod = sum_mod / n_samples;
+        double avg_r10 = sum_r10 / n_samples;
+        double avg_r20 = sum_r20 / n_samples;
+        double avg_r50 = sum_r50 / n_samples;
+        double avg_active = sum_active / n_samples;
+
+        // Composite score: reward correlation + variability + modulation,
+        // penalize refractory locking
+        double best_r = std::max({avg_r10, avg_r20, avg_r50});
+        double score = 1.5 * best_r + 0.3 * avg_cv + 0.3 * avg_mod
+                       - 1.5 * avg_ref;
+        // Penalty for too-low activity (< 10 Hz)
+        if (avg_rate < 10.0) score -= 0.5 * (10.0 - avg_rate) / 10.0;
+
+        fprintf(csv, "%.4f,%.2f,%.4f,%.4f,"
+                     "%.2f,%.4f,%.4f,%.4f,"
+                     "%.4f,%.4f,%.4f,"
+                     "%.1f,%.4f\n",
+                pt.stim_current, pt.input_tau_e, pt.input_adapt_inc, pt.input_std_u,
+                avg_rate, avg_cv, avg_ref, avg_mod,
+                avg_r10, avg_r20, avg_r50,
+                avg_active, score);
+        fflush(csv);
+
+        int gc = gp + 1;
+        double elapsed = now_seconds() - t_start;
+        double eta = (elapsed / gc) * (n_grid - gc);
+        printf("  [%4d/%d] stim=%.2f tau_e=%.1f adapt=%.2f std_u=%.2f | "
+               "rate=%.0fHz r50=%.3f refr=%.2f score=%.3f | "
+               "%.0fs elapsed, ETA %.0fs\n",
+               gc, n_grid,
+               pt.stim_current, pt.input_tau_e, pt.input_adapt_inc, pt.input_std_u,
+               avg_rate, avg_r50, avg_ref, score,
+               elapsed, eta);
+    }
+
+    fclose(csv);
+    double total = now_seconds() - t_start;
+    printf("\n======================================================================\n");
+    printf("  DONE: %d grid points in %.1fs (%.1f min)\n", n_grid, total, total / 60.0);
+    printf("  Results: %s\n", output_csv.c_str());
+    printf("======================================================================\n");
+    return 0;
+}
 
 // ============================================================
 // GRID POINT
@@ -341,7 +698,8 @@ static AllSamplesResult run_all_samples(const NetworkConfig& cfg,
                                          const std::vector<AudioSample>& samples,
                                          const DynamicalOverrides& dyn_ovr,
                                          const SimConfig& sim_cfg,
-                                         int n_workers) {
+                                         int n_workers,
+                                         bool verbose = true) {
     int n_samples = (int)samples.size();
     AllSamplesResult out;
     out.res_bins_list.resize(n_samples);
@@ -387,7 +745,7 @@ static AllSamplesResult run_all_samples(const NetworkConfig& cfg,
             out.adapt_stim_ends[i] = wr.mean_adapt_stim_end;
 
             int c = ++completed;
-            if (c % 100 == 0 || c == n_samples) {
+            if (verbose && (c % 100 == 0 || c == n_samples)) {
                 #pragma omp critical
                 printf("        %5d/%d\n", c, n_samples);
             }
@@ -404,7 +762,7 @@ static double measure_rate(const NetworkConfig& cfg,
                            const std::vector<AudioSample>& samples_subset,
                            const DynamicalOverrides& dyn_ovr,
                            const SimConfig& sim_cfg, int n_workers) {
-    auto res = run_all_samples(cfg, samples_subset, dyn_ovr, sim_cfg, n_workers);
+    auto res = run_all_samples(cfg, samples_subset, dyn_ovr, sim_cfg, n_workers, false);
     double trial_dur_s = (sim_cfg.audio_duration_ms + POST_STIM_MS) / 1000.0;
     double sum = 0;
     for (int i = 0; i < (int)samples_subset.size(); i++) {
@@ -434,7 +792,8 @@ calibrate_stimulus_current(NetworkConfig cfg,
         sim_cfg.stimulus_current = initial_guess;
         double rate = measure_rate(cfg, cal_samples, dyn_ovr, sim_cfg, n_workers);
         log.push_back({iteration, initial_guess, rate});
-        printf("      cal[%d] stim=%.4f -> %.1f Hz (cached)\n", iteration, initial_guess, rate);
+        printf("    cal[%d] stim=%.4f -> %.1f Hz (target=%.1f)\n",
+               iteration, initial_guess, rate, target_rate);
         iteration++;
         if (std::abs(rate - target_rate) <= RATE_TOLERANCE_HZ)
             return {initial_guess, rate, log};
@@ -449,7 +808,8 @@ calibrate_stimulus_current(NetworkConfig cfg,
         sim_cfg.stimulus_current = mid;
         double rate = measure_rate(cfg, cal_samples, dyn_ovr, sim_cfg, n_workers);
         log.push_back({iteration, mid, rate});
-        printf("      cal[%d] stim=%.4f -> %.1f Hz\n", iteration, mid, rate);
+        printf("    cal[%d] stim=%.4f -> %.1f Hz (target=%.1f)\n",
+               iteration, mid, rate, target_rate);
 
         if (std::abs(rate - target_rate) <= RATE_TOLERANCE_HZ)
             return {mid, rate, log};
@@ -495,14 +855,15 @@ static ClassifyResult classify_flat_ridge(const std::vector<Mat>& bins_list,
     std::vector<double> repeat_accs;
     std::vector<std::vector<int>> last_cm;
 
-    for (int rep = 0; rep < N_SPLIT_REPEATS; rep++) {
-        auto split = stratified_shuffle_split(y, 0.4, SEED + rep);
+    for (int rep = 0; rep < N_CV_REPEATS; rep++) {
+        auto folds = cls::stratified_kfold(y, N_CV_FOLDS, SEED + rep);
 
-        double best_acc = -1;
-        std::vector<int> best_preds;
+        double rep_correct = 0;
+        int rep_total = 0;
 
-        for (double alpha : RIDGE_ALPHAS) {
-            // Extract train/test
+        for (int f = 0; f < N_CV_FOLDS; f++) {
+            auto& split = folds[f];
+
             Mat X_train((int)split.train.size(), n_features);
             std::vector<int> y_train(split.train.size());
             for (int i = 0; i < (int)split.train.size(); i++) {
@@ -512,35 +873,46 @@ static ClassifyResult classify_flat_ridge(const std::vector<Mat>& bins_list,
             }
 
             Mat X_test((int)split.test.size(), n_features);
-            std::vector<int> y_test(split.test.size());
+            std::vector<int> y_test_vec(split.test.size());
             for (int i = 0; i < (int)split.test.size(); i++) {
                 for (int j = 0; j < n_features; j++)
                     X_test(i, j) = X_flat(split.test[i], j);
-                y_test[i] = y[split.test[i]];
+                y_test_vec[i] = y[split.test[i]];
             }
 
-            StandardScaler scaler;
+            cls::StandardScaler scaler;
             X_train = scaler.fit_transform(X_train);
             X_test = scaler.transform(X_test);
-            nan_to_num(X_train);
-            nan_to_num(X_test);
+            cls::nan_to_num(X_train);
+            cls::nan_to_num(X_test);
 
-            auto rr = ridge_classify(X_train, y_train, X_test, y_test,
-                                      alpha, DEFAULT_DIGITS);
-            if (rr.accuracy > best_acc) {
-                best_acc = rr.accuracy;
-                best_preds = rr.predictions;
+            auto fold_ctx = cls::ridge_fold_prepare(X_train, y_train, X_test, y_test_vec,
+                                                      DEFAULT_DIGITS);
+
+            double best_acc = -1;
+            std::vector<int> best_preds;
+
+            for (double alpha : RIDGE_ALPHAS) {
+                auto rr = cls::ridge_fold_solve(fold_ctx, X_test, y_test_vec, alpha);
+                if (rr.accuracy > best_acc) {
+                    best_acc = rr.accuracy;
+                    best_preds = rr.predictions;
+                }
             }
+
+            int n_test = (int)split.test.size();
+            int correct = 0;
+            std::vector<int> y_test_for_cm(n_test);
+            for (int i = 0; i < n_test; i++) {
+                y_test_for_cm[i] = y[split.test[i]];
+                if (best_preds[i] == y_test_for_cm[i]) correct++;
+            }
+            rep_correct += correct;
+            rep_total += n_test;
+            last_cm = cls::confusion_matrix(y_test_for_cm, best_preds, DEFAULT_DIGITS);
         }
 
-        repeat_accs.push_back(best_acc);
-        last_cm = confusion_matrix(
-            std::vector<int>(split.test.size()),
-            best_preds, DEFAULT_DIGITS);
-        // Actually build y_test for cm
-        std::vector<int> y_test_for_cm(split.test.size());
-        for (int i = 0; i < (int)split.test.size(); i++) y_test_for_cm[i] = y[split.test[i]];
-        last_cm = confusion_matrix(y_test_for_cm, best_preds, DEFAULT_DIGITS);
+        repeat_accs.push_back(rep_correct / rep_total);
     }
 
     double mean_acc = 0, std_acc = 0;
@@ -569,11 +941,14 @@ static std::vector<double> classify_per_bin(const std::vector<Mat>& bins_list,
         }
 
         std::vector<double> rep_accs;
-        for (int rep = 0; rep < N_SPLIT_REPEATS; rep++) {
-            auto split = stratified_shuffle_split(y, 0.4, SEED + rep);
-            double best_acc = -1;
+        for (int rep = 0; rep < N_CV_REPEATS; rep++) {
+            auto folds = cls::stratified_kfold(y, N_CV_FOLDS, SEED + rep);
+            double rep_correct = 0;
+            int rep_total = 0;
 
-            for (double alpha : RIDGE_ALPHAS) {
+            for (int f = 0; f < N_CV_FOLDS; f++) {
+                auto& split = folds[f];
+
                 Mat Xtr((int)split.train.size(), n_reservoir);
                 std::vector<int> ytr(split.train.size());
                 for (int i = 0; i < (int)split.train.size(); i++) {
@@ -586,15 +961,31 @@ static std::vector<double> classify_per_bin(const std::vector<Mat>& bins_list,
                     for (int j = 0; j < n_reservoir; j++) Xte(i, j) = X_bin(split.test[i], j);
                     yte[i] = y[split.test[i]];
                 }
-                StandardScaler sc;
+                cls::StandardScaler sc;
                 Xtr = sc.fit_transform(Xtr);
                 Xte = sc.transform(Xte);
-                nan_to_num(Xtr);
-                nan_to_num(Xte);
-                auto rr = ridge_classify(Xtr, ytr, Xte, yte, alpha, DEFAULT_DIGITS);
-                if (rr.accuracy > best_acc) best_acc = rr.accuracy;
+                cls::nan_to_num(Xtr);
+                cls::nan_to_num(Xte);
+
+                auto fold_ctx = cls::ridge_fold_prepare(Xtr, ytr, Xte, yte, DEFAULT_DIGITS);
+
+                double best_acc = -1;
+                std::vector<int> best_preds;
+
+                for (double alpha : RIDGE_ALPHAS) {
+                    auto rr = cls::ridge_fold_solve(fold_ctx, Xte, yte, alpha);
+                    if (rr.accuracy > best_acc) {
+                        best_acc = rr.accuracy;
+                        best_preds = rr.predictions;
+                    }
+                }
+                int n_test = (int)split.test.size();
+                for (int i = 0; i < n_test; i++) {
+                    if (best_preds[i] == y[split.test[i]]) rep_correct++;
+                }
+                rep_total += n_test;
             }
-            rep_accs.push_back(best_acc);
+            rep_accs.push_back(rep_correct / rep_total);
         }
         double s = 0;
         for (double a : rep_accs) s += a;
@@ -755,6 +1146,15 @@ int main(int argc, char** argv) {
     bool verify_only = false;
     std::string verify_output = "";
     std::string data_dir_override = "";
+    int trace_neuron = -1;
+    int trace_sample = 0;
+    std::string trace_output = "";
+    std::string trace_file = "";  // direct path to a single .npz audio file
+    bool no_noise = false;
+    bool no_input_nmda = false;
+    double stim_current_override = -1.0;  // -1 = use default 0.88
+    bool input_grid = false;
+    std::string input_grid_output = "input_grid_results.csv";
 
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) == "--arms" && i + 1 < argc) arms = argv[++i];
@@ -766,6 +1166,15 @@ int main(int argc, char** argv) {
         else if (std::string(argv[i]) == "--verify-output" && i + 1 < argc) verify_output = argv[++i];
         else if (std::string(argv[i]) == "--samples-per-digit" && i + 1 < argc) SAMPLES_PER_DIGIT = std::atoi(argv[++i]);
         else if (std::string(argv[i]) == "--data-dir" && i + 1 < argc) data_dir_override = argv[++i];
+        else if (std::string(argv[i]) == "--trace-neuron" && i + 1 < argc) trace_neuron = std::atoi(argv[++i]);
+        else if (std::string(argv[i]) == "--trace-sample" && i + 1 < argc) trace_sample = std::atoi(argv[++i]);
+        else if (std::string(argv[i]) == "--trace-output" && i + 1 < argc) trace_output = argv[++i];
+        else if (std::string(argv[i]) == "--trace-file" && i + 1 < argc) trace_file = argv[++i];
+        else if (std::string(argv[i]) == "--no-noise") no_noise = true;
+        else if (std::string(argv[i]) == "--no-input-nmda") no_input_nmda = true;
+        else if (std::string(argv[i]) == "--stim-current" && i + 1 < argc) stim_current_override = std::atof(argv[++i]);
+        else if (std::string(argv[i]) == "--input-grid") input_grid = true;
+        else if (std::string(argv[i]) == "--input-grid-output" && i + 1 < argc) input_grid_output = argv[++i];
     }
 
     // Default: use network_snapshot.npz next to the binary if it exists
@@ -781,6 +1190,17 @@ int main(int argc, char** argv) {
     #ifdef _OPENMP
     omp_set_num_threads(n_workers);
     #endif
+
+    // --input-grid mode: early exit
+    if (input_grid) {
+        fs::path exe_dir = fs::path(argv[0]).parent_path();
+        fs::path base_dir = exe_dir.parent_path();
+        if (base_dir.empty()) base_dir = ".";
+        std::string ig_data_dir = data_dir_override.empty()
+            ? (base_dir / "data").string() : data_dir_override;
+        return run_input_grid(argc, argv, g_snapshot_path, ig_data_dir,
+                               n_workers, input_grid_output);
+    }
 
     // Determine paths
     fs::path exe_dir = fs::path(argv[0]).parent_path();
@@ -805,12 +1225,107 @@ int main(int argc, char** argv) {
     printf("  Samples: %d per digit = %d total\n", SAMPLES_PER_DIGIT, SAMPLES_PER_DIGIT * N_DIGITS);
     printf("  Workers: %d\n", n_workers);
     printf("  Readout: Flat Ridge (all %.0fms bins concatenated)\n", BIN_MS);
-    printf("  CV: 60/40 StratifiedShuffleSplit x %d repeats\n", N_SPLIT_REPEATS);
+    printf("  CV: StratifiedKFold(%d) x %d repeats\n", N_CV_FOLDS, N_CV_REPEATS);
     if (!g_snapshot_path.empty()) {
         printf("  SNAPSHOT: %s\n", g_snapshot_path.c_str());
         printf("  (Network loaded from Python export — RNG-independent)\n");
     }
     printf("======================================================================\n");
+
+    // --trace-neuron with --trace-file: skip sample loader entirely
+    if (trace_neuron >= 0 && !trace_file.empty()) {
+        if (trace_output.empty()) trace_output = "trace_cpp.csv";
+
+        auto nf = load_npz(trace_file);
+        AudioSample s;
+        s.spike_times_ms = nf["spike_times_ms"].to_float64_vec();
+        s.freq_bin_indices = nf["freq_bin_indices"].to_int32_vec();
+        fs::path fp(trace_file);
+        std::string fname = fp.stem().string();
+        s.filename = fname;
+        s.digit = 0;
+        if (fname.size() > 12 && fname.substr(0, 12) == "spike_train_") {
+            s.digit = std::atoi(fname.substr(12, 1).c_str());
+        }
+
+        printf("\n[TRACE] Neuron %d, file: %s (%d spikes)\n",
+               trace_neuron, fname.c_str(), (int)s.spike_times_ms.size());
+
+        double sample_max_ms = *std::max_element(
+            s.spike_times_ms.begin(), s.spike_times_ms.end());
+        printf("  Max spike time: %.2f ms\n", sample_max_ms);
+        sample_max_ms += 5.0;
+
+        SimConfig trace_sim;
+        trace_sim.dt = 0.1;
+        trace_sim.audio_duration_ms = sample_max_ms;
+        trace_sim.post_stimulus_ms = POST_STIM_MS;
+        trace_sim.stimulus_current = (stim_current_override > 0) ? stim_current_override : 0.88;
+
+        DynamicalOverrides dyn_ovr;
+        dyn_ovr.shell_core_mult = LHS021_SHELL_CORE_MULT;
+        dyn_ovr.core_core_mult = LHS021_CORE_CORE_MULT;
+        dyn_ovr.adapt_inc = LHS021_ADAPT_INC;
+        dyn_ovr.nmda_tau = FIXED_NMDA_TAU;
+
+        SphericalNetwork net;
+        ZoneInfo zone_info;
+        if (!g_snapshot_path.empty()) {
+            load_network_snapshot(net, zone_info, g_snapshot_path, trace_sim.dt, true);
+            apply_dynamical_overrides(net, zone_info, trace_sim.dt, dyn_ovr);
+        } else {
+            NetworkConfig base_cfg = make_base_config();
+            base_cfg.lambda_connect = LHS021_LAMBDA_CONNECT;
+            build_full_network(net, zone_info, base_cfg, trace_sim.dt, true, &dyn_ovr);
+        }
+        StdMasks masks = build_std_masks(net, zone_info);
+
+        if (no_noise) {
+            std::fill(net.v_noise_amp_arr.begin(), net.v_noise_amp_arr.end(), 0.0);
+            std::fill(net.i_noise_amp_arr.begin(), net.i_noise_amp_arr.end(), 0.0);
+            printf("  Noise DISABLED\n");
+        }
+        if (no_input_nmda) {
+            net.skip_stim_nmda = true;
+            printf("  Input NMDA DISABLED (skip_stim_nmda=true)\n");
+        }
+
+        // Print input neuron indices for sweep scripts
+        printf("  INPUT_NEURON_INDICES:");
+        for (int idx : zone_info.input_neuron_indices) printf(" %d", idx);
+        printf("\n");
+
+        net.trace_neuron_id = trace_neuron;
+        net.trace.clear();
+
+        double total_ms = trace_sim.audio_duration_ms + trace_sim.post_stimulus_ms;
+        printf("  Running simulation (%.1f ms, dt=%.1f)...\n", total_ms, trace_sim.dt);
+
+        auto result = run_sample_with_std(net, s, zone_info, trace_sim,
+                                           STD_U, STD_TAU_REC, masks,
+                                           trace_sim.audio_duration_ms);
+
+        printf("  %d timesteps recorded\n", (int)net.trace.size());
+
+        FILE* f = fopen(trace_output.c_str(), "w");
+        if (!f) { fprintf(stderr, "Cannot open %s\n", trace_output.c_str()); return 1; }
+        fprintf(f, "step,t_ms,v,g_e,g_i,g_i_slow,g_nmda,adaptation,"
+                   "i_e,i_i,i_i_slow,i_nmda,i_adapt,"
+                   "v_noise,ge_noise,gi_noise,spiked\n");
+        for (size_t si = 0; si < net.trace.size(); si++) {
+            auto& r = net.trace[si];
+            fprintf(f, "%d,%.4f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,"
+                       "%.8f,%.8f,%.8f,%.8f,%.8f,"
+                       "%.8f,%.8f,%.8f,%d\n",
+                    (int)si, si * trace_sim.dt,
+                    r.v, r.g_e, r.g_i, r.g_i_slow, r.g_nmda, r.adaptation,
+                    r.i_e, r.i_i, r.i_i_slow, r.i_nmda, r.i_adapt,
+                    r.v_noise, r.ge_noise, r.gi_noise, r.spiked ? 1 : 0);
+        }
+        fclose(f);
+        printf("  Wrote %s\n", trace_output.c_str());
+        return 0;
+    }
 
     // 1. Load audio
     printf("\n[1] Loading audio samples...\n");
@@ -820,6 +1335,91 @@ int main(int argc, char** argv) {
 
     std::vector<int> y(n_samples);
     for (int i = 0; i < n_samples; i++) y[i] = samples[i].digit;
+
+    // --trace-neuron mode (without --trace-file): use loaded samples
+    if (trace_neuron >= 0) {
+        if (trace_output.empty()) trace_output = "trace_cpp.csv";
+
+        if (trace_sample >= n_samples) {
+            fprintf(stderr, "trace_sample %d >= n_samples %d\n", trace_sample, n_samples);
+            return 1;
+        }
+
+        printf("\n[TRACE] Neuron %d, sample %d (%s), output: %s\n",
+               trace_neuron, trace_sample, samples[trace_sample].filename.c_str(),
+               trace_output.c_str());
+
+        double sample_max_ms = *std::max_element(
+            samples[trace_sample].spike_times_ms.begin(),
+            samples[trace_sample].spike_times_ms.end());
+        sample_max_ms += 5.0;
+
+        SimConfig trace_sim;
+        trace_sim.dt = 0.1;
+        trace_sim.audio_duration_ms = sample_max_ms;
+        trace_sim.post_stimulus_ms = POST_STIM_MS;
+        trace_sim.stimulus_current = (stim_current_override > 0) ? stim_current_override : 0.88;
+
+        DynamicalOverrides dyn_ovr;
+        dyn_ovr.shell_core_mult = LHS021_SHELL_CORE_MULT;
+        dyn_ovr.core_core_mult = LHS021_CORE_CORE_MULT;
+        dyn_ovr.adapt_inc = LHS021_ADAPT_INC;
+        dyn_ovr.nmda_tau = FIXED_NMDA_TAU;
+
+        SphericalNetwork net;
+        ZoneInfo zone_info;
+        if (!g_snapshot_path.empty()) {
+            load_network_snapshot(net, zone_info, g_snapshot_path, trace_sim.dt, true);
+            apply_dynamical_overrides(net, zone_info, trace_sim.dt, dyn_ovr);
+        } else {
+            NetworkConfig base_cfg = make_base_config();
+            base_cfg.lambda_connect = LHS021_LAMBDA_CONNECT;
+            build_full_network(net, zone_info, base_cfg, trace_sim.dt, true, &dyn_ovr);
+        }
+        StdMasks masks = build_std_masks(net, zone_info);
+
+        if (no_noise) {
+            std::fill(net.v_noise_amp_arr.begin(), net.v_noise_amp_arr.end(), 0.0);
+            std::fill(net.i_noise_amp_arr.begin(), net.i_noise_amp_arr.end(), 0.0);
+            printf("  Noise DISABLED\n");
+        }
+        if (no_input_nmda) {
+            net.skip_stim_nmda = true;
+            printf("  Input NMDA DISABLED (skip_stim_nmda=true)\n");
+        }
+
+        net.trace_neuron_id = trace_neuron;
+        net.trace.clear();
+
+        printf("  Running simulation (%.1f ms, dt=%.1f)...\n",
+               trace_sim.audio_duration_ms + trace_sim.post_stimulus_ms, trace_sim.dt);
+
+        auto result = run_sample_with_std(net, samples[trace_sample], zone_info, trace_sim,
+                                           STD_U, STD_TAU_REC, masks,
+                                           trace_sim.audio_duration_ms);
+
+        printf("  %d timesteps recorded\n", (int)net.trace.size());
+
+        // Write CSV
+        FILE* f = fopen(trace_output.c_str(), "w");
+        if (!f) { fprintf(stderr, "Cannot open %s\n", trace_output.c_str()); return 1; }
+        fprintf(f, "step,t_ms,v,g_e,g_i,g_i_slow,g_nmda,adaptation,"
+                   "i_e,i_i,i_i_slow,i_nmda,i_adapt,"
+                   "v_noise,ge_noise,gi_noise,spiked\n");
+        for (size_t s = 0; s < net.trace.size(); s++) {
+            auto& r = net.trace[s];
+            fprintf(f, "%d,%.4f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,"
+                       "%.8f,%.8f,%.8f,%.8f,%.8f,"
+                       "%.8f,%.8f,%.8f,%d\n",
+                    (int)s, s * trace_sim.dt,
+                    r.v, r.g_e, r.g_i, r.g_i_slow, r.g_nmda, r.adaptation,
+                    r.i_e, r.i_i, r.i_i_slow, r.i_nmda, r.i_adapt,
+                    r.v_noise, r.ge_noise, r.gi_noise, r.spiked ? 1 : 0);
+        }
+        fclose(f);
+        printf("  Wrote %s\n", trace_output.c_str());
+        return 0;
+    }
 
     double max_audio_ms = 0;
     for (auto& s : samples) {
@@ -1010,7 +1610,6 @@ int main(int argc, char** argv) {
         double tau_val = pt.adapt_tau;
 
         double gp_start = now_seconds();
-        double elapsed_total = gp_start - sweep_start;
 
         std::string eta_str = "calculating...";
         if (!grid_point_times.empty()) {
@@ -1025,11 +1624,8 @@ int main(int argc, char** argv) {
             eta_str = buf;
         }
 
-        printf("\n____________________________________________________________\n");
-        printf("  [%s] inc=%.4f, tau=%.1fms  (%d/%d)  |  ETA: %s\n",
-               pt.source.c_str(), inc_val, tau_val, pt_num + 1, n_grid, eta_str.c_str());
-        printf("  Elapsed: %.1fh\n", elapsed_total / 3600.0);
-        printf("____________________________________________________________\n");
+        printf("\n  [%d/%d] inc=%.4f, tau=%.1fms  |  ETA: %s\n",
+               pt_num + 1, n_grid, inc_val, tau_val, eta_str.c_str());
 
         DynamicalOverrides dyn_ovr;
         dyn_ovr.shell_core_mult = LHS021_SHELL_CORE_MULT;
@@ -1050,7 +1646,6 @@ int main(int argc, char** argv) {
             hi = std::min(hi, prev_stim * 3.0);
         }
 
-        printf("    Calibrating (target %.1f Hz)...\n", target_rate_hz);
         auto [matched_stim, cal_rate, cal_log] =
             calibrate_stimulus_current(base_cfg, dyn_ovr, cal_samples, cal_sim,
                                        n_workers, target_rate_hz, lo, hi,
@@ -1058,14 +1653,13 @@ int main(int argc, char** argv) {
 
         // Retry if missed
         if (std::abs(cal_rate - target_rate_hz) > RATE_TOLERANCE_HZ) {
-            printf("    Retrying with global bounds...\n");
             std::tie(matched_stim, cal_rate, cal_log) =
                 calibrate_stimulus_current(base_cfg, dyn_ovr, cal_samples, cal_sim,
                                            n_workers, target_rate_hz);
         }
 
         if (pt.tau_idx >= 0) last_stim_by_tau[pt.tau_idx] = matched_stim;
-        printf("    Matched: stim=%.4f -> %.1f Hz\n", matched_stim, cal_rate);
+        printf("    Calibrated: stim=%.4f -> %.1f Hz\n", matched_stim, cal_rate);
 
         // Full evaluation
         SimConfig eval_sim = sim_cfg;
@@ -1087,7 +1681,7 @@ int main(int argc, char** argv) {
         }
         rate_std = std::sqrt(rate_std / n_samples);
 
-        printf("    Sim: %.0fs, Rate: %.1f +/- %.1f Hz\n", sim_time, rate_mean, rate_std);
+        // Results printed after classification below
 
         // Classification
         int eval_n_bins = 0;
@@ -1099,8 +1693,7 @@ int main(int argc, char** argv) {
                                            bsa_result.per_repeat_accuracy,
                                            cls_res.accuracy, bsa_result.accuracy);
 
-        printf("    Classification: %.1f%% (gap=%+.1fpp %s)\n",
-               cls_res.accuracy * 100, stats.gap_pp, stats.stars.c_str());
+        // (printed below after all metrics computed)
 
         // ISI stats
         double isi_cv_mean = 0;
@@ -1121,8 +1714,9 @@ int main(int argc, char** argv) {
         // Per-bin accuracy
         auto per_bin_acc = classify_per_bin(res.res_bins_list, y, eval_n_bins, res.n_reservoir);
 
-        printf("    ISI CV: %.3f, g_adapt: %.4f, PR: %.4f\n",
-               isi_cv_mean, adapt_mean, pr_mean);
+        printf("    Rate: %.1f Hz | Acc: %.1f%% (gap=%+.1fpp %s) | ISI CV: %.3f | PR: %.4f\n",
+               rate_mean, cls_res.accuracy * 100, stats.gap_pp, stats.stars.c_str(),
+               isi_cv_mean, pr_mean);
 
         // Build JSON for this grid point
         std::ostringstream oss;

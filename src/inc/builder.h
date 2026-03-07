@@ -69,6 +69,8 @@ struct SimConfig {
     double audio_duration_ms = 800.0;
     double post_stimulus_ms = 200.0;
     double stimulus_current = 0.88;
+    double input_std_u = 0.0;        // STD on BSA->input injection (0=off)
+    double input_std_tau_rec = 500.0; // recovery time constant for input STD
 };
 
 struct RunResult {
