@@ -227,6 +227,15 @@ void create_ring_zone_network(SphericalNetwork& net, ZoneInfo& zone_info,
     }
 }
 
+void apply_input_neuron_regime(SphericalNetwork& net, const ZoneInfo& zone_info, double dt) {
+    for (int nid : zone_info.input_neuron_indices) {
+        net.tau_e[nid] = INPUT_TAU_E;
+        net.adaptation_increment[nid] = INPUT_ADAPT_INC;
+    }
+    net.skip_stim_nmda = true;
+    net.precompute_decay_factors(dt);
+}
+
 void apply_config_b_overrides(SphericalNetwork& net, ZoneInfo& zone_info, double dt) {
     int n = net.n_neurons;
     // Scale input->reservoir weights
@@ -263,6 +272,7 @@ void apply_config_b_overrides(SphericalNetwork& net, ZoneInfo& zone_info, double
 
     net.build_csr();
     net.precompute_decay_factors(dt);
+    apply_input_neuron_regime(net, zone_info, dt);
 }
 
 void apply_dynamical_overrides(SphericalNetwork& net, ZoneInfo& zone_info,
@@ -340,6 +350,7 @@ void apply_dynamical_overrides(SphericalNetwork& net, ZoneInfo& zone_info,
 
     net.build_csr();
     net.precompute_decay_factors(dt);
+    apply_input_neuron_regime(net, zone_info, dt);
 }
 
 void compact_network(SphericalNetwork& net, ZoneInfo& zone_info,

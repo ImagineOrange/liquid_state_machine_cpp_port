@@ -15,25 +15,86 @@ Excitatory recurrent connections undergo short-term depression (Tsodyks-Markram,
 
 The network is loaded from a deterministic Python-exported snapshot (`network_snapshot.npz`) for bit-identical topology across implementations.
 
-## Gaussian frequency tuning curves
+## Input encoding pipeline
 
-Input neurons receive BSA-encoded audio via **Gaussian-weighted frequency tuning**, replacing the original flat/equal overlap scheme. This preserves frequency-specific information through the input layer.
+The input encoding pipeline transforms raw audio (WAV files) into spatiotemporally patterned current injection across the reservoir's input shell. Each stage is designed to preserve frequency-specific temporal information while respecting the biological constraints of the spiking network.
 
-**How it works:**
+### Pipeline stages (WAV to reservoir)
 
-1. **Quantile-based channel centers.** 128 mel-frequency bin centers are placed at evenly-spaced quantiles of the input neuron phi (azimuthal angle) distribution. This compresses the full frequency spectrum onto the populated arc, eliminating coverage gaps from irregular neuron spacing.
+**1. BSA encoding (offline preprocessing)** — Raw WAV files are converted to spike trains via the Ben's Spiker Algorithm (BSA). Each spike has a time (ms) and frequency bin index (0-127, mel-scale). Stored as `.npz` files with arrays `spike_times_ms` and `freq_bin_indices`.
 
-2. **Neuron-to-bins mapping.** Each input neuron selects its K=4 nearest frequency bin centers (by phi distance). This guarantees every neuron maps to exactly K bins — uniform receptive field size.
+**2. Warmup period** — BSA spike times are shifted forward by 50 ms (`warmup_ms = 50.0` in `run_raster_dump`) to allow the network to settle before stimulus onset.
 
-3. **Gaussian weighting.** Each mapping gets weight `w = exp(-d^2 / (2*sigma^2))` where `d` is the phi-distance between neuron and channel center, and `sigma = 1.5 * avg_neuron_spacing`. At this sigma: center weight = 1.0, 1 channel away = 0.80, 2 channels = 0.41, 3 channels = 0.14.
+**3. Tonotopic mapping via Gaussian tuning curves** — Input neurons on the surface shell are mapped to frequency bins through a multi-step process:
 
-4. **Injection.** During simulation, BSA spikes in frequency bin `m` are injected into all neurons mapped to bin `m`, scaled by their tuning weight: `I = stim_current * w`.
+- **Quantile-based channel centers.** 128 mel-frequency bin centers are placed at evenly-spaced quantiles of the input neuron phi (azimuthal angle) distribution. This compresses the full frequency spectrum onto the populated arc, eliminating coverage gaps from irregular neuron spacing.
+- **K-nearest bins.** Each input neuron selects its K=4 nearest frequency bin centers (by phi distance), guaranteeing uniform receptive field size.
+- **Gaussian weighting.** Each mapping gets weight `w = exp(-d² / (2σ²))` where d is the phi-distance between neuron and channel center, and σ = 1.5 × avg_neuron_spacing. Resulting weights: center = 1.0, 1 channel away = 0.80, 2 channels = 0.41, 3 channels = 0.14.
+- **Coverage.** K=4 with quantile centers achieves 128/128 bin coverage (every bin has at least one mapped neuron), with mean weight 0.859.
+- **Constants** in `src/inc/builder.h`: `OVERLAP_K = 4`, `TUNING_SIGMA_CHANNELS = 1.5`.
 
-**Coverage:** K=4 with quantile centers achieves 128/128 bin coverage (every bin has at least one mapped neuron), with mean weight 0.859 and zero wasted weights.
+**4. Current injection** — During simulation, BSA spikes in frequency bin `m` are injected into all neurons mapped to bin `m`, scaled by their tuning weight: `I = stim_current × w`. The stimulus current is 0.0518 nA (optimized via grid search). NMDA is disabled on input injection (`skip_stim_nmda = true`).
 
-**Key parameters** (defined in `src/inc/builder.h`):
-- `OVERLAP_K = 4` — bins per neuron
-- `TUNING_SIGMA_CHANNELS = 1.5` — Gaussian sigma in units of channel spacing
+**5. Input neuron dynamics** — Input neurons are LIF neurons with optimized parameters:
+
+- `tau_e = 1.05 ms` — excitatory synaptic time constant; fast decay prevents conductance saturation while preserving temporal structure.
+- `adaptation_increment = 0.0` — no spike-frequency adaptation; adaptation destroys temporal information.
+- No short-term depression on input (STD U = 0.0).
+- These are applied via `apply_input_neuron_regime()` in `builder.cpp`.
+
+**6. Feedforward to reservoir** — Input shell neurons project to reservoir core neurons through the existing distance-dependent connectivity. Shell-to-core weights are scaled by 4.85x (`LHS021_SHELL_CORE_MULT`). Intra-shell and feedback connections are removed.
+
+### Parameter selection
+
+The input neuron parameters (`stim_current`, `tau_e`, `adaptation_increment`, STD) were selected via an 8,000-point grid search (`--input-grid` mode) optimizing mutual information between BSA input and input neuron spike output while enforcing biological plausibility constraints.
+
+**Grid search axes:** `stim_current` (20 log-spaced, 0.01-5.0) × `tau_e` (10 log-spaced, 0.05-12.0 ms) × `adapt_inc` (8 values, 0-5.0) × STD pairs (5 combinations) = 8,000 points × 30 audio samples = 240,000 simulations.
+
+**Scoring:** `score = MI + 0.15 × r@20ms + 0.05 × modulation_depth` with hard biological gates (rate 5-150 Hz, ISI CV 0.3-2.0, refractory fraction < 10%, burst fraction < 15%).
+
+**Optimal parameters** (rank 1, composite score 1.236):
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `stim_current` | 0.0518 | Drives ~85 Hz firing rate with tau_e=1.05 |
+| `tau_e` | 1.05 ms | Fast decay prevents conductance saturation while preserving temporal structure |
+| `adapt_inc` | 0.0 | Adaptation smooths spike response, destroying temporal MI; steep drop-off above 0.05 |
+| `input_std_u` | 0.0 | STD is weakly harmful at input stage; top 4 configs all have no STD |
+| Input NMDA | disabled | Removes slow NMDA dynamics that would blur temporal information |
+
+The top 50 configurations occupy a narrow performance band (score 1.172-1.236) along a constant-rate isocline at ~80-95 Hz, confirming the optimum is robust. MI peaks at ~1.06 bits out of 3.0 theoretical maximum (8-quantile), representing the fundamental information bottleneck of 124 neurons encoding 128 channels through overlapping Gaussian tuning curves.
+
+MI refinement with 20 samples/digit confirmed the initial grid search rankings and showed MI estimates are binning-limited: q8=1.19, q16=1.50, q32=1.93 bits at the top configurations.
+
+### Frequency selectivity verification
+
+Analysis of a single digit presentation (digit 0, "george_0") confirms frequency information propagates through the input layer:
+
+- **Band-rate correlation:** r = 0.982 between BSA and input spike rates across 16 frequency bands.
+- **Per-neuron selectivity:** 121/129 neurons (94%) show higher correlation with matched BSA bins than with random unmatched bins.
+- **Mean matched r:** 0.91 vs mean unmatched r: 0.50.
+
+**Figures:**
+
+- `results/raster/raster_spike_train_0_george_0.png` — 5-panel figure: mel spectrogram, BSA raster, input shell raster (tonotopically sorted), reservoir raster (sorted by dominant input neuron), population PSTH.
+- `results/raster/selectivity_spike_train_0_george_0.png` — 2-panel selectivity analysis: frequency band rates + per-neuron selectivity scatter.
+- `results/gaussian_tuning_curves/` — Gaussian tuning coverage overview and single-neuron detail.
+- `results/input_grid_search/` — Full grid search results, heatmaps, t-SNE embedding.
+- `results/neuron_diagnostics/` — Single-neuron state traces (BSA → conductance → spikes chain).
+
+### Code references
+
+| Component | File | Key constants/functions |
+|-----------|------|------------------------|
+| Tuning curve construction | `src/src/builder.cpp` | `create_ring_zone_network()`, `load_network_snapshot()` |
+| Tuning constants | `src/inc/builder.h` | `OVERLAP_K=4`, `TUNING_SIGMA_CHANNELS=1.5` |
+| Input regime defaults | `src/inc/builder.h` | `INPUT_STIM_CURRENT=0.0518`, `INPUT_TAU_E=1.05`, `INPUT_ADAPT_INC=0.0` |
+| Input regime application | `src/src/builder.cpp` | `apply_input_neuron_regime()` |
+| BSA-to-neuron injection | `src/src/builder.cpp` | `run_sample_with_std()` |
+| Grid search | `src/src/input_grid.cpp` | `run_input_grid()`, `run_mi_refine()` |
+| Raster dump | `src/src/classification.cpp` | `run_raster_dump()` |
+| Selectivity analysis | `experiments/plot_selectivity.py` | Reads from raster dump |
+| Raster figure | `experiments/plot_raster.py` | 5-panel publication figure |
 
 ## Experiments
 
@@ -49,7 +110,7 @@ Confirms the C++ port is behaviorally equivalent to the Python implementation �
 
 The input shell converts continuous BSA spike trains into the reservoir's spiking language — if it destroys frequency information, no downstream processing can recover it. This 8,000-point grid search over `(stim_current, tau_e, adapt_inc, STD params)` finds the input neuron dynamical regime that maximizes mutual information between BSA input and output spikes while staying in a biologically plausible firing regime.
 
-**Results:** Optimal params are `stim=0.0158, tau_e=1.93ms, adapt_inc=0.005, no STD`. MI ≥ 1.18 bits (8-quantile, 20ms bins); refinement at higher quantile counts (q16: ~1.50, q32: ~1.93) shows the estimate is binning-limited. The top 50 configs form a broad plateau with <0.05 bit spread — the optimum is robust, not fragile.
+**Results:** Optimal params are `stim=0.0518, tau_e=1.05ms, adapt_inc=0.0, no STD` (composite score 1.236, MI=1.057 bits, r@20ms=0.884, 85 Hz). MI refinement at higher quantile counts (q16: ~1.50, q32: ~1.93) shows the estimate is binning-limited. The top 50 configs form a broad plateau with <0.05 bit spread — the optimum is robust, not fragile.
 
 **Files:** `results/input_grid_search/`
 
@@ -131,10 +192,9 @@ make                    # produces ./cls_sweep
 # MI refinement of top grid search configs
 ./cls_sweep --mi-refine --mi-refine-top 50 --mi-refine-samples 20 --n-workers 8
 
-# Single neuron trace
+# Single neuron trace (uses optimized input params by default)
 ./cls_sweep --trace-neuron 493 --trace-file data/spike_trains_bsa/spike_train_0_george_0.npz \
-    --trace-output trace.csv --no-noise --no-input-nmda \
-    --stim-current 0.0158 --input-tau-e 1.93 --input-adapt-inc 0.005
+    --trace-output trace.csv --no-noise
 
 # Behavioral verification
 ./cls_sweep --verify-only --verify-output verify_cpp.json --samples-per-digit 100

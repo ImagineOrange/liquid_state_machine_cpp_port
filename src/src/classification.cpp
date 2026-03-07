@@ -672,18 +672,22 @@ int run_raster_dump(const std::string& snapshot_path,
     if (fname.size() > 12 && fname.substr(0, 12) == "spike_train_")
         s.digit = std::atoi(fname.substr(12, 1).c_str());
 
+    // Shift BSA spike times forward by warmup period
+    double warmup_ms = 50.0;
+    for (auto& t : s.spike_times_ms) t += warmup_ms;
+
     double sample_max_ms = *std::max_element(
         s.spike_times_ms.begin(), s.spike_times_ms.end()) + 5.0;
 
-    printf("[RASTER DUMP] file: %s (%d BSA spikes, digit %d)\n",
-           fname.c_str(), (int)s.spike_times_ms.size(), s.digit);
+    printf("[RASTER DUMP] file: %s (%d BSA spikes, digit %d, %.0fms warmup)\n",
+           fname.c_str(), (int)s.spike_times_ms.size(), s.digit, warmup_ms);
 
     // Build network
     SimConfig sim;
     sim.dt = 0.1;
     sim.audio_duration_ms = sample_max_ms;
     sim.post_stimulus_ms = POST_STIM_MS;
-    sim.stimulus_current = (stim_current_override > 0) ? stim_current_override : 0.88;
+    sim.stimulus_current = (stim_current_override > 0) ? stim_current_override : INPUT_STIM_CURRENT;
 
     DynamicalOverrides dyn_ovr;
     dyn_ovr.shell_core_mult = LHS021_SHELL_CORE_MULT;
@@ -701,19 +705,20 @@ int run_raster_dump(const std::string& snapshot_path,
         base_cfg.lambda_connect = LHS021_LAMBDA_CONNECT;
         build_full_network(net, zone_info, base_cfg, sim.dt, true, &dyn_ovr);
     }
+    // Input neuron regime applied by apply_dynamical_overrides / build_full_network
     StdMasks masks = build_std_masks(net, zone_info);
 
-    // Apply input neuron overrides
-    if (input_tau_e_override > 0) {
+    // CLI overrides (override the baked-in defaults if specified)
+    if (input_tau_e_override > 0 && input_tau_e_override != INPUT_TAU_E) {
         for (int idx : zone_info.input_neuron_indices)
             net.tau_e[idx] = input_tau_e_override;
         net.precompute_decay_factors(sim.dt);
-        printf("  Input tau_e = %.2f ms\n", input_tau_e_override);
+        printf("  Input tau_e overridden to %.2f ms\n", input_tau_e_override);
     }
-    if (input_adapt_inc_override >= 0) {
+    if (input_adapt_inc_override >= 0 && input_adapt_inc_override != INPUT_ADAPT_INC) {
         for (int idx : zone_info.input_neuron_indices)
             net.adaptation_increment[idx] = input_adapt_inc_override;
-        printf("  Input adapt_inc = %.4f\n", input_adapt_inc_override);
+        printf("  Input adapt_inc overridden to %.4f\n", input_adapt_inc_override);
     }
 
     // Run simulation
@@ -727,6 +732,44 @@ int run_raster_dump(const std::string& snapshot_path,
     // Build zone lookup
     std::set<int> input_set(zone_info.input_neuron_indices.begin(),
                             zone_info.input_neuron_indices.end());
+
+    // Per-reservoir-neuron: total drive and per-input-neuron drive breakdown
+    // For each reservoir neuron, find which input neuron drives it most
+    std::map<int, double> reservoir_total_drive;
+    std::map<int, std::map<int, double>> reservoir_per_input;  // res_nid -> (input_nid -> weight_sum)
+    for (int src : zone_info.input_neuron_indices) {
+        int64_t start = net.csr_indptr[src];
+        int64_t end = net.csr_indptr[src + 1];
+        for (int64_t j = start; j < end; j++) {
+            int tgt = net.csr_targets[j];
+            if (!input_set.count(tgt)) {
+                double w = std::abs(net.csr_weights[j]);
+                reservoir_total_drive[tgt] += w;
+                reservoir_per_input[tgt][src] += w;
+            }
+        }
+    }
+
+    // Write input_drive.csv with dominant input neuron
+    {
+        std::string drive_path = output_dir + "/input_drive.csv";
+        FILE* fd = fopen(drive_path.c_str(), "w");
+        fprintf(fd, "neuron_id,input_drive,dominant_input\n");
+        for (int nid : zone_info.reservoir_zone_indices) {
+            double total = reservoir_total_drive[nid];
+            int dominant = -1;
+            double max_w = 0.0;
+            auto pit = reservoir_per_input.find(nid);
+            if (pit != reservoir_per_input.end()) {
+                for (auto& [inp, w] : pit->second) {
+                    if (w > max_w) { max_w = w; dominant = inp; }
+                }
+            }
+            fprintf(fd, "%d,%.6f,%d\n", nid, total, dominant);
+        }
+        fclose(fd);
+        printf("  Wrote %s\n", drive_path.c_str());
+    }
 
     // Write spikes.csv
     std::string spikes_path = output_dir + "/spikes.csv";
@@ -754,6 +797,39 @@ int run_raster_dump(const std::string& snapshot_path,
     fclose(f);
     printf("  Wrote %s (%d BSA spikes)\n", bsa_path.c_str(), (int)s.spike_times_ms.size());
 
+    // Write neurons.csv — input neuron to freq bin mapping
+    std::string neurons_path = output_dir + "/neurons.csv";
+    f = fopen(neurons_path.c_str(), "w");
+    fprintf(f, "neuron_id,freq_bins,weights\n");
+    // Invert the mapping: freq_bin->[neurons] to neuron->[freq_bins]
+    std::map<int, std::vector<std::pair<int, double>>> neuron_to_bins;
+    for (const auto& [bin, neurons] : zone_info.input_neuron_mapping) {
+        auto wit = zone_info.input_neuron_weights.find(bin);
+        for (size_t j = 0; j < neurons.size(); j++) {
+            double w = (wit != zone_info.input_neuron_weights.end() && j < wit->second.size())
+                       ? wit->second[j] : 1.0;
+            neuron_to_bins[neurons[j]].emplace_back(bin, w);
+        }
+    }
+    for (int nid : zone_info.input_neuron_indices) {
+        auto& bins = neuron_to_bins[nid];
+        std::sort(bins.begin(), bins.end());
+        fprintf(f, "%d,\"", nid);
+        for (size_t j = 0; j < bins.size(); j++) {
+            if (j > 0) fprintf(f, ";");
+            fprintf(f, "%d", bins[j].first);
+        }
+        fprintf(f, "\",\"");
+        for (size_t j = 0; j < bins.size(); j++) {
+            if (j > 0) fprintf(f, ";");
+            fprintf(f, "%.4f", bins[j].second);
+        }
+        fprintf(f, "\"\n");
+    }
+    fclose(f);
+    printf("  Wrote %s (%d input neurons)\n", neurons_path.c_str(),
+           (int)zone_info.input_neuron_indices.size());
+
     // Write meta.json
     std::string meta_path = output_dir + "/meta.json";
     f = fopen(meta_path.c_str(), "w");
@@ -762,6 +838,7 @@ int run_raster_dump(const std::string& snapshot_path,
     fprintf(f, "  \"audio_duration_ms\": %.2f,\n", sim.audio_duration_ms);
     fprintf(f, "  \"post_stimulus_ms\": %.2f,\n", sim.post_stimulus_ms);
     fprintf(f, "  \"total_ms\": %.2f,\n", total_ms);
+    fprintf(f, "  \"warmup_ms\": %.2f,\n", warmup_ms);
     fprintf(f, "  \"stim_current\": %.6f,\n", sim.stimulus_current);
     fprintf(f, "  \"n_input\": %d,\n", (int)zone_info.input_neuron_indices.size());
     fprintf(f, "  \"n_reservoir\": %d,\n", (int)zone_info.reservoir_zone_indices.size());
@@ -837,7 +914,7 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
         trace_sim.dt = 0.1;
         trace_sim.audio_duration_ms = sample_max_ms;
         trace_sim.post_stimulus_ms = POST_STIM_MS;
-        trace_sim.stimulus_current = (stim_current_override > 0) ? stim_current_override : 0.88;
+        trace_sim.stimulus_current = (stim_current_override > 0) ? stim_current_override : INPUT_STIM_CURRENT;
 
         DynamicalOverrides dyn_ovr;
         dyn_ovr.shell_core_mult = LHS021_SHELL_CORE_MULT;
@@ -855,6 +932,7 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
             base_cfg.lambda_connect = LHS021_LAMBDA_CONNECT;
             build_full_network(net, zone_info, base_cfg, trace_sim.dt, true, &dyn_ovr);
         }
+        // Input neuron regime applied by apply_dynamical_overrides / build_full_network
         StdMasks masks = build_std_masks(net, zone_info);
 
         if (no_noise) {
@@ -862,24 +940,18 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
             std::fill(net.i_noise_amp_arr.begin(), net.i_noise_amp_arr.end(), 0.0);
             printf("  Noise DISABLED\n");
         }
-        if (no_input_nmda) {
-            net.skip_stim_nmda = true;
-            printf("  Input NMDA DISABLED (skip_stim_nmda=true)\n");
-        }
 
-        if (input_tau_e_override > 0 || input_adapt_inc_override >= 0) {
-            for (int idx : zone_info.input_neuron_indices) {
-                if (input_tau_e_override > 0)
-                    net.tau_e[idx] = input_tau_e_override;
-                if (input_adapt_inc_override >= 0)
-                    net.adaptation_increment[idx] = input_adapt_inc_override;
-            }
-            if (input_tau_e_override > 0) {
-                net.precompute_decay_factors(trace_sim.dt);
-                printf("  Input tau_e overridden to %.2f ms\n", input_tau_e_override);
-            }
-            if (input_adapt_inc_override >= 0)
-                printf("  Input adapt_inc overridden to %.4f\n", input_adapt_inc_override);
+        // CLI overrides (override the baked-in defaults if specified)
+        if (input_tau_e_override > 0 && input_tau_e_override != INPUT_TAU_E) {
+            for (int idx : zone_info.input_neuron_indices)
+                net.tau_e[idx] = input_tau_e_override;
+            net.precompute_decay_factors(trace_sim.dt);
+            printf("  Input tau_e overridden to %.2f ms\n", input_tau_e_override);
+        }
+        if (input_adapt_inc_override >= 0 && input_adapt_inc_override != INPUT_ADAPT_INC) {
+            for (int idx : zone_info.input_neuron_indices)
+                net.adaptation_increment[idx] = input_adapt_inc_override;
+            printf("  Input adapt_inc overridden to %.4f\n", input_adapt_inc_override);
         }
         if (input_std_u_override >= 0) {
             trace_sim.input_std_u = input_std_u_override;
@@ -953,7 +1025,7 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
         trace_sim.dt = 0.1;
         trace_sim.audio_duration_ms = sample_max_ms;
         trace_sim.post_stimulus_ms = POST_STIM_MS;
-        trace_sim.stimulus_current = (stim_current_override > 0) ? stim_current_override : 0.88;
+        trace_sim.stimulus_current = (stim_current_override > 0) ? stim_current_override : INPUT_STIM_CURRENT;
 
         DynamicalOverrides dyn_ovr;
         dyn_ovr.shell_core_mult = LHS021_SHELL_CORE_MULT;
@@ -971,6 +1043,7 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
             base_cfg.lambda_connect = LHS021_LAMBDA_CONNECT;
             build_full_network(net, zone_info, base_cfg, trace_sim.dt, true, &dyn_ovr);
         }
+        // Input neuron regime applied by apply_dynamical_overrides / build_full_network
         StdMasks masks = build_std_masks(net, zone_info);
 
         if (no_noise) {
@@ -978,24 +1051,18 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
             std::fill(net.i_noise_amp_arr.begin(), net.i_noise_amp_arr.end(), 0.0);
             printf("  Noise DISABLED\n");
         }
-        if (no_input_nmda) {
-            net.skip_stim_nmda = true;
-            printf("  Input NMDA DISABLED (skip_stim_nmda=true)\n");
-        }
 
-        if (input_tau_e_override > 0 || input_adapt_inc_override >= 0) {
-            for (int idx : zone_info.input_neuron_indices) {
-                if (input_tau_e_override > 0)
-                    net.tau_e[idx] = input_tau_e_override;
-                if (input_adapt_inc_override >= 0)
-                    net.adaptation_increment[idx] = input_adapt_inc_override;
-            }
-            if (input_tau_e_override > 0) {
-                net.precompute_decay_factors(trace_sim.dt);
-                printf("  Input tau_e overridden to %.2f ms\n", input_tau_e_override);
-            }
-            if (input_adapt_inc_override >= 0)
-                printf("  Input adapt_inc overridden to %.4f\n", input_adapt_inc_override);
+        // CLI overrides (override the baked-in defaults if specified)
+        if (input_tau_e_override > 0 && input_tau_e_override != INPUT_TAU_E) {
+            for (int idx : zone_info.input_neuron_indices)
+                net.tau_e[idx] = input_tau_e_override;
+            net.precompute_decay_factors(trace_sim.dt);
+            printf("  Input tau_e overridden to %.2f ms\n", input_tau_e_override);
+        }
+        if (input_adapt_inc_override >= 0 && input_adapt_inc_override != INPUT_ADAPT_INC) {
+            for (int idx : zone_info.input_neuron_indices)
+                net.adaptation_increment[idx] = input_adapt_inc_override;
+            printf("  Input adapt_inc overridden to %.4f\n", input_adapt_inc_override);
         }
         if (input_std_u_override >= 0) {
             trace_sim.input_std_u = input_std_u_override;
@@ -1070,7 +1137,7 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
     sim_cfg.dt = 0.1;
     sim_cfg.audio_duration_ms = max_audio_ms;
     sim_cfg.post_stimulus_ms = POST_STIM_MS;
-    sim_cfg.stimulus_current = 0.88;
+    sim_cfg.stimulus_current = INPUT_STIM_CURRENT;
 
     std::vector<AudioSample> cal_samples(samples.begin(),
                                           samples.begin() + std::min(CALIBRATION_N_SAMPLES, n_samples));

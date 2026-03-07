@@ -21,6 +21,13 @@ constexpr int OVERLAP_K = 4;
 // sigma=1.5 means weight drops to ~0.80 at 1 channel, ~0.41 at 2, ~0.14 at 3.
 constexpr double TUNING_SIGMA_CHANNELS = 1.5;
 
+// Optimized input neuron regime (from 8,000-point grid search)
+// These are applied automatically after network construction/loading.
+constexpr double INPUT_STIM_CURRENT = 0.0518;  // BSA→input injection current (nA)
+constexpr double INPUT_TAU_E = 1.05;            // excitatory synaptic time constant (ms)
+constexpr double INPUT_ADAPT_INC = 0.0;         // spike-frequency adaptation increment
+constexpr double INPUT_STD_U = 0.0;             // short-term depression on input (disabled)
+
 // Config B constants
 constexpr double WEIGHT_MULT = 5.0;
 constexpr double ADAPT_INC_DEFAULT = 0.5;
@@ -53,6 +60,12 @@ void create_ring_zone_network(SphericalNetwork& net, ZoneInfo& zone_info,
                               const NetworkConfig& cfg, bool quiet = false,
                               const std::string& connectivity_regime = "default");
 
+// Apply optimized input neuron regime (tau_e, adapt_inc, skip_stim_nmda).
+// Called automatically at the end of apply_config_b_overrides and
+// apply_dynamical_overrides, so input neurons always get these params.
+void apply_input_neuron_regime(SphericalNetwork& net, const ZoneInfo& zone_info,
+                                double dt);
+
 void apply_config_b_overrides(SphericalNetwork& net, ZoneInfo& zone_info,
                               double dt);
 
@@ -73,8 +86,8 @@ struct SimConfig {
     double dt = 0.1;
     double audio_duration_ms = 800.0;
     double post_stimulus_ms = 200.0;
-    double stimulus_current = 0.88;
-    double input_std_u = 0.0;        // STD on BSA->input injection (0=off)
+    double stimulus_current = INPUT_STIM_CURRENT;
+    double input_std_u = INPUT_STD_U;
     double input_std_tau_rec = 500.0; // recovery time constant for input STD
 };
 
