@@ -44,42 +44,11 @@ The system performs **5-class spoken digit classification** (digits 0-4) using r
 
 **Metrics.** Per grid point: classification accuracy (mean/std over 5 repeats), gap vs BSA baseline (paired t-test, bootstrap CI, Cohen's d), firing rate, ISI coefficient of variation, mean adaptation conductance at stimulus end, PCA participation ratio, and per-bin accuracy curves.
 
-## Project structure
-
-```
-├── src/
-│   ├── inc/
-│   │   ├── common.h          # Shared utilities (RNG, Mat, SVD, JSON helpers)
-│   │   ├── network.h         # SphericalNetwork (LIF neurons, CSR connectivity, ring buffer)
-│   │   ├── builder.h         # Network construction, zone topology, simulation driver
-│   │   ├── ml.h              # Ridge classifier, StandardScaler, stratified split, stats
-│   │   └── npz_reader.h      # NumPy .npz file reader (ZIP + zlib)
-│   └── src/
-│       ├── main.cpp           # Sweep driver
-│       ├── network.cpp        # Spiking network dynamics and connectivity
-│       ├── builder.cpp        # Ring-zone topology, weight overrides, STD, compaction
-│       ├── ml.cpp             # ML pipeline and statistical tests
-│       └── npz_reader.cpp     # NPZ/NPY parsing
-├── docker/
-│   └── Dockerfile             # Debian Trixie slim build environment
-├── Makefile                   # C++17, -O3, LAPACK/BLAS, zlib, OpenMP
-├── dev.sh                     # Docker dev container launcher
-└── data/                      # (not tracked) BSA spike train .npz files
-    ├── preprocessing_config_bsa.json
-    └── spike_trains_bsa/      # ~7 GB, 3000 .npz files
-```
-
-## Dependencies
-
-- C++17 compiler (g++ or clang++)
-- LAPACK/BLAS (Accelerate on macOS, liblapack/libblas on Linux)
-- zlib
-- OpenMP (optional, for parallel simulation)
-
 ## Build
 
 ```bash
 make            # produces ./cls_sweep
+make test 		# executes Catch2 tests
 make clean      # remove binary and object files
 ```
 

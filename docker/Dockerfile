@@ -8,12 +8,19 @@ RUN apt-get update && apt install -y --no-install-recommends \
     build-essential \
     g++ \
     make \
+    cmake \
+    micro \
+    nano \
+    vim \
+    valgrind \
     zlib1g-dev \
     liblapack-dev \
     libblas-dev \
     libgomp1 \
+    git \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && apt -y autoremove 
+    && apt -y autoremove
 
 # Set up workspace
 WORKDIR /workspace
