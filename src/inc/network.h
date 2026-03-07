@@ -92,6 +92,19 @@ public:
     std::vector<std::vector<double>> ring_weights;
     std::vector<std::vector<bool>> ring_slow_inh;
 
+    // Skip NMDA on stimulate_neuron/stimulate_neurons calls (experiment flag)
+    bool skip_stim_nmda = false;
+
+    // Single-neuron trace recording (optional)
+    int trace_neuron_id = -1;  // -1 = disabled
+    struct TraceRow {
+        double v, g_e, g_i, g_i_slow, g_nmda, adaptation;
+        double i_e, i_i, i_i_slow, i_nmda, i_adapt;
+        double v_noise, ge_noise, gi_noise;
+        bool spiked;
+    };
+    std::vector<TraceRow> trace;
+
     // Activity tracking
     std::vector<int> network_activity;
     int current_avalanche_size = 0;

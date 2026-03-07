@@ -297,7 +297,7 @@ void SphericalNetwork::build_csr() {
         }
     }
 
-    printf("CSR: %d outgoing connections\n", total);
+    (void)total;
 }
 
 void SphericalNetwork::precompute_decay_factors(double dt) {
@@ -378,6 +378,7 @@ std::vector<int> SphericalNetwork::update_network(double dt) {
     }
 
     // 3. Membrane dynamics
+    double trace_v_noise = 0.0;
     for (int i = 0; i < n_neurons; i++) {
         double vi = v[i];
         double i_e = g_e[i] * (e_reversal_arr[i] - vi);
@@ -389,7 +390,12 @@ std::vector<int> SphericalNetwork::update_network(double dt) {
 
         double dv = dt * ((-(vi - v_rest[i]) / tau_m[i]) + i_e + i_nmda + i_i + i_is + i_adapt);
         v[i] += dv;
-        v[i] += rng_normal() * v_noise_amp_arr[i];
+        double vn = rng_normal() * v_noise_amp_arr[i];
+        v[i] += vn;
+
+        if (i == trace_neuron_id) {
+            trace_v_noise = vn;
+        }
     }
 
     // Clamp refractory
@@ -407,11 +413,16 @@ std::vector<int> SphericalNetwork::update_network(double dt) {
     }
 
     // 5. Synaptic noise
+    double trace_ge_noise = 0.0, trace_gi_noise = 0.0;
     for (int i = 0; i < n_neurons; i++) {
         double ne = rng_normal() * i_noise_amp_arr[i];
         double ni = rng_normal() * i_noise_amp_arr[i];
         if (ne > 0) g_e[i] += ne;
         if (ni > 0) g_i[i] += ni;
+        if (i == trace_neuron_id) {
+            trace_ge_noise = ne > 0 ? ne : 0.0;
+            trace_gi_noise = ni > 0 ? ni : 0.0;
+        }
     }
 
     // 6. Spike detection
@@ -427,6 +438,23 @@ std::vector<int> SphericalNetwork::update_network(double dt) {
         v[idx] = v_reset[idx];
         t_since_spike[idx] = 0.0;
         adaptation[idx] += adaptation_increment[idx];
+    }
+
+    // 8. Record trace for target neuron
+    if (trace_neuron_id >= 0 && trace_neuron_id < n_neurons) {
+        int ti = trace_neuron_id;
+        double vi = v[ti];
+        double ie = g_e[ti] * (e_reversal_arr[ti] - vi);
+        double ii = g_i[ti] * (i_reversal_arr[ti] - vi);
+        double iis = g_i_slow[ti] * (i_reversal_arr[ti] - vi);
+        double mgb = 1.0 / (1.0 + _mg_factor * std::exp(-0.062 * vi));
+        double inmda = g_nmda[ti] * mgb * (e_reversal_arr[ti] - vi);
+        double iadapt = adaptation[ti] * (k_reversal_arr[ti] - vi);
+        bool spiked = false;
+        for (int idx : active) { if (idx == ti) { spiked = true; break; } }
+        trace.push_back({v[ti], g_e[ti], g_i[ti], g_i_slow[ti], g_nmda[ti], adaptation[ti],
+                         ie, ii, iis, inmda, iadapt,
+                         trace_v_noise, trace_ge_noise, trace_gi_noise, spiked});
     }
 
     // 8. Activity tracking
@@ -457,6 +485,7 @@ void SphericalNetwork::reset_all() {
     std::fill(g_i_slow.begin(), g_i_slow.end(), 0.0);
     std::fill(g_nmda.begin(), g_nmda.end(), 0.0);
     std::fill(adaptation.begin(), adaptation.end(), 0.0);
+    trace.clear();
     for (int i = 0; i < n_neurons; i++) t_since_spike[i] = tau_ref[i] + 1e-5;
 
     network_activity.clear();
@@ -470,7 +499,8 @@ void SphericalNetwork::stimulate_neuron(int idx, double current) {
     if (idx < 0 || idx >= n_neurons) return;
     if (current > 0) {
         g_e[idx] += current;
-        g_nmda[idx] += current * nmda_ratio;
+        if (!skip_stim_nmda)
+            g_nmda[idx] += current * nmda_ratio;
     } else {
         g_i[idx] += -current;
     }
@@ -483,7 +513,8 @@ void SphericalNetwork::stimulate_neurons(const std::vector<int>& indices,
         double c = currents[k];
         if (c > 0) {
             g_e[idx] += c;
-            g_nmda[idx] += c * nmda_ratio;
+            if (!skip_stim_nmda)
+                g_nmda[idx] += c * nmda_ratio;
         } else if (c < 0) {
             g_i[idx] += -c;
         }

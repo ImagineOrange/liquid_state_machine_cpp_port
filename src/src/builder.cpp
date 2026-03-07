@@ -488,7 +488,7 @@ RunResult run_sample_with_std(SphericalNetwork& net, const AudioSample& sample,
         step_to_spikes[step].push_back(i);
     }
 
-    // STD state
+    // STD state (recurrent)
     int n_neurons = net.n_neurons;
     std::vector<double> x_resource;
     std::vector<double> last_update_time;
@@ -504,6 +504,17 @@ RunResult run_sample_with_std(SphericalNetwork& net, const AudioSample& sample,
             original_weights[nid].assign(net.csr_weights.begin() + start,
                                          net.csr_weights.begin() + end);
         }
+    }
+
+    // Input STD state (depression on BSA->input injection)
+    bool use_input_std = sim_cfg.input_std_u > 0.0;
+    double input_std_u = sim_cfg.input_std_u;
+    double input_std_tau = sim_cfg.input_std_tau_rec;
+    std::vector<double> input_x;
+    std::vector<double> input_last_time;
+    if (use_input_std) {
+        input_x.assign(n_neurons, 1.0);
+        input_last_time.assign(n_neurons, -1e9);
     }
 
     bool record_adapt = record_adapt_at_ms >= 0;
@@ -528,7 +539,22 @@ RunResult run_sample_with_std(SphericalNetwork& net, const AudioSample& sample,
                 }
             }
             if (!neuron_indices.empty()) {
-                std::vector<double> currents(neuron_indices.size(), stim_current);
+                std::vector<double> currents(neuron_indices.size());
+                for (size_t k = 0; k < neuron_indices.size(); k++) {
+                    double eff = stim_current;
+                    if (use_input_std) {
+                        int nid = neuron_indices[k];
+                        double dt_since = t_ms - input_last_time[nid];
+                        if (dt_since > 0 && input_x[nid] < 1.0) {
+                            input_x[nid] = 1.0 - (1.0 - input_x[nid]) *
+                                std::exp(-dt_since / input_std_tau);
+                        }
+                        eff *= input_x[nid];
+                        input_x[nid] *= (1.0 - input_std_u);
+                        input_last_time[nid] = t_ms;
+                    }
+                    currents[k] = eff;
+                }
                 net.stimulate_neurons(neuron_indices, currents);
             }
         }
