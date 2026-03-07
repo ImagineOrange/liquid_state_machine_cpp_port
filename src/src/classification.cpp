@@ -216,12 +216,23 @@ struct AllSamplesResult {
     std::vector<double> adapt_stim_ends;
 };
 
+// Apply tonic background current to reservoir neurons only.
+// bg_current > 0 is depolarizing (increases rate), < 0 is hyperpolarizing.
+static void set_reservoir_background_current(SphericalNetwork& net,
+                                              const ZoneInfo& zone_info,
+                                              double bg_current) {
+    net.background_current.assign(net.n_neurons, 0.0);
+    for (int nid : zone_info.reservoir_zone_indices)
+        net.background_current[nid] = bg_current;
+}
+
 static AllSamplesResult run_all_samples(const NetworkConfig& cfg,
                                          const std::vector<AudioSample>& samples,
                                          const DynamicalOverrides& dyn_ovr,
                                          const SimConfig& sim_cfg,
                                          int n_workers,
-                                         bool verbose = true) {
+                                         bool verbose = true,
+                                         double bg_current = 0.0) {
     int n_samples = (int)samples.size();
     AllSamplesResult out;
     out.res_bins_list.resize(n_samples);
@@ -245,6 +256,8 @@ static AllSamplesResult run_all_samples(const NetworkConfig& cfg,
                               &dyn_ovr, "default", true);
         }
         StdMasks masks = build_std_masks(net, zone_info);
+        if (bg_current != 0.0)
+            set_reservoir_background_current(net, zone_info, bg_current);
 
         rng_seed(cfg.n_neurons + 42 + (uint64_t)omp_get_thread_num() * 1000 +
                  (uint64_t)getpid());
@@ -280,8 +293,9 @@ static AllSamplesResult run_all_samples(const NetworkConfig& cfg,
 static double measure_rate(const NetworkConfig& cfg,
                            const std::vector<AudioSample>& samples_subset,
                            const DynamicalOverrides& dyn_ovr,
-                           const SimConfig& sim_cfg, int n_workers) {
-    auto res = run_all_samples(cfg, samples_subset, dyn_ovr, sim_cfg, n_workers, false);
+                           const SimConfig& sim_cfg, int n_workers,
+                           double bg_current = 0.0) {
+    auto res = run_all_samples(cfg, samples_subset, dyn_ovr, sim_cfg, n_workers, false, bg_current);
     double trial_dur_s = (sim_cfg.audio_duration_ms + POST_STIM_MS) / 1000.0;
     double sum = 0;
     for (int i = 0; i < (int)samples_subset.size(); i++) {
@@ -295,51 +309,54 @@ static double measure_rate(const NetworkConfig& cfg,
 // ============================================================
 struct CalLogEntry { int iter; double stim_current; double rate_hz; };
 
+// ============================================================
+// CALIBRATION — BACKGROUND CURRENT (reservoir-only tonic current)
+// ============================================================
+static constexpr double BG_CURRENT_LO = -0.5;   // hyperpolarizing floor
+static constexpr double BG_CURRENT_HI = 0.5;     // depolarizing ceiling
+
 static std::tuple<double, double, std::vector<CalLogEntry>>
-calibrate_stimulus_current(NetworkConfig cfg,
-                           const DynamicalOverrides& dyn_ovr,
-                           const std::vector<AudioSample>& cal_samples,
-                           SimConfig sim_cfg, int n_workers,
-                           double target_rate,
-                           double lo = CALIBRATION_STIM_LO,
-                           double hi = CALIBRATION_STIM_HI,
-                           double initial_guess = -1.0) {
+calibrate_background_current(NetworkConfig cfg,
+                              const DynamicalOverrides& dyn_ovr,
+                              const std::vector<AudioSample>& cal_samples,
+                              SimConfig sim_cfg, int n_workers,
+                              double target_rate,
+                              double initial_guess = 0.0) {
     std::vector<CalLogEntry> log;
+    double lo = BG_CURRENT_LO, hi = BG_CURRENT_HI;
     int iteration = 0;
 
-    if (initial_guess > 0) {
-        sim_cfg.stimulus_current = initial_guess;
-        double rate = measure_rate(cfg, cal_samples, dyn_ovr, sim_cfg, n_workers);
+    // Try initial guess first
+    {
+        double rate = measure_rate(cfg, cal_samples, dyn_ovr, sim_cfg, n_workers, initial_guess);
         log.push_back({iteration, initial_guess, rate});
-        printf("    cal[%d] stim=%.4f -> %.1f Hz (target=%.1f)\n",
+        printf("    bg_cal[%d] bg=%.4f -> %.1f Hz (target=%.1f)\n",
                iteration, initial_guess, rate, target_rate);
         iteration++;
         if (std::abs(rate - target_rate) <= RATE_TOLERANCE_HZ)
             return {initial_guess, rate, log};
-        double margin = 3.0;
-        lo = std::max(lo, initial_guess / margin);
-        hi = std::min(hi, initial_guess * margin);
         if (rate > target_rate) hi = initial_guess; else lo = initial_guess;
     }
 
-    for (; iteration < CALIBRATION_MAX_ITER; iteration++) {
+    for (;; iteration++) {
         double mid = (lo + hi) / 2.0;
-        sim_cfg.stimulus_current = mid;
-        double rate = measure_rate(cfg, cal_samples, dyn_ovr, sim_cfg, n_workers);
+        double rate = measure_rate(cfg, cal_samples, dyn_ovr, sim_cfg, n_workers, mid);
         log.push_back({iteration, mid, rate});
-        printf("    cal[%d] stim=%.4f -> %.1f Hz (target=%.1f)\n",
+        printf("    bg_cal[%d] bg=%.4f -> %.1f Hz (target=%.1f)\n",
                iteration, mid, rate, target_rate);
 
         if (std::abs(rate - target_rate) <= RATE_TOLERANCE_HZ)
             return {mid, rate, log};
 
         if (rate > target_rate) hi = mid; else lo = mid;
-        if (hi - lo < 1e-5) break;
-    }
 
-    auto best = std::min_element(log.begin(), log.end(),
-        [&](auto& a, auto& b) { return std::abs(a.rate_hz - target_rate) < std::abs(b.rate_hz - target_rate); });
-    return {best->stim_current, best->rate_hz, log};
+        // If interval collapses, widen and continue
+        if (hi - lo < 1e-6) {
+            lo = std::min(lo, mid - 0.1);
+            hi = std::max(hi, mid + 0.1);
+            printf("    bg_cal: interval collapsed, widening to [%.4f, %.4f]\n", lo, hi);
+        }
+    }
 }
 
 // ============================================================
@@ -874,7 +891,7 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
 
     printf("======================================================================\n");
     printf("  CLASSIFICATION ADAPTATION PARAMETER SWEEP (C++ PORT)\n");
-    printf("  Grid points: %d\n", n_grid);
+    printf("  Grid points: %d x 2 branches (A=unmatched, B=bg-current-matched)\n", n_grid);
     printf("  Task: 5-class digit classification (digits 0-4)\n");
     printf("  Samples: %d per digit = %d total\n", SAMPLES_PER_DIGIT, SAMPLES_PER_DIGIT * N_DIGITS);
     printf("  Workers: %d\n", n_workers);
@@ -1157,11 +1174,15 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
     auto bl_res = run_all_samples(base_cfg, samples, lhs021_ovr, sim_cfg, n_workers);
     double bl_sim_time = now_seconds() - bl_t0;
 
-    double target_rate_hz = 0;
+    // Branch B calibration target: fixed sensory-cortex evoked rate (literature-based)
+    double target_rate_hz = RATE_TARGET_HZ;
+
+    // Measure LHS-021 baseline rate for reporting (not used as calibration target)
+    double bl_rate_hz = 0;
     for (int i = 0; i < n_samples; i++) {
-        target_rate_hz += bl_res.total_spikes[i] / (bl_res.n_reservoir * trial_dur_s);
+        bl_rate_hz += bl_res.total_spikes[i] / (bl_res.n_reservoir * trial_dur_s);
     }
-    target_rate_hz /= n_samples;
+    bl_rate_hz /= n_samples;
 
     int target_n_bins = 0;
     for (auto& b : bl_res.res_bins_list)
@@ -1174,7 +1195,7 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
                                           bl_cls.accuracy, bsa_result.accuracy);
 
     printf("  LHS-021: %.0fs\n", bl_sim_time);
-    printf("  Rate: %.1f Hz -> calibration target\n", target_rate_hz);
+    printf("  Rate: %.1f Hz (calibration target: %.1f Hz)\n", bl_rate_hz, target_rate_hz);
     printf("  Classification: %.1f%% (gap=%+.1fpp %s)\n",
            bl_cls.accuracy * 100, bl_stats.gap_pp, bl_stats.stars.c_str());
 
@@ -1195,7 +1216,7 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
         fprintf(f, "{\n");
         fprintf(f, "  \"n_samples\": %d,\n", n_samples);
         fprintf(f, "  \"n_reservoir\": %d,\n", bl_res.n_reservoir);
-        fprintf(f, "  \"mean_firing_rate_hz\": %.10f,\n", target_rate_hz);
+        fprintf(f, "  \"mean_firing_rate_hz\": %.10f,\n", bl_rate_hz);
         fprintf(f, "  \"classification_accuracy\": %.10f,\n", bl_cls.accuracy);
         fprintf(f, "  \"classification_accuracy_std\": %.10f,\n", bl_cls.accuracy_std);
         fprintf(f, "  \"per_repeat_accuracy\": [");
@@ -1263,78 +1284,21 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
              "\"firing_rate_hz\": %.4f, \"sim_time_s\": %.1f, \"n_reservoir\": %d}",
              bl_cls.accuracy, bl_cls.accuracy_std,
              bl_stats.gap_pp, bl_stats.stars.c_str(),
-             target_rate_hz, bl_sim_time, bl_res.n_reservoir);
+             bl_rate_hz, bl_sim_time, bl_res.n_reservoir);
     std::string baseline_json = bl_json_buf;
 
-    // 5. Sweep
-    printf("\n[4] Running %d grid points (rate-matched to %.1f +/- %.0f Hz)...\n",
-           n_grid, target_rate_hz, RATE_TOLERANCE_HZ);
-
-    std::vector<std::map<std::string, std::string>> grid_results_json;
-    std::vector<double> grid_point_times;
-    double sweep_start = now_seconds();
-    std::map<int, double> last_stim_by_tau;
-
-    for (int pt_num = 0; pt_num < n_grid; pt_num++) {
-        auto& pt = grid_points[pt_num];
-        double inc_val = pt.adapt_inc;
-        double tau_val = pt.adapt_tau;
-
-        double gp_start = now_seconds();
-
-        std::string eta_str = "calculating...";
-        if (!grid_point_times.empty()) {
-            int last_n = std::min((int)grid_point_times.size(), 10);
-            double avg_t = 0;
-            for (int i = (int)grid_point_times.size() - last_n; i < (int)grid_point_times.size(); i++)
-                avg_t += grid_point_times[i];
-            avg_t /= last_n;
-            double eta_h = avg_t * (n_grid - pt_num) / 3600.0;
-            char buf[64];
-            snprintf(buf, sizeof(buf), "%.1fh", eta_h);
-            eta_str = buf;
-        }
-
-        printf("\n  [%d/%d] inc=%.4f, tau=%.1fms  |  ETA: %s\n",
-               pt_num + 1, n_grid, inc_val, tau_val, eta_str.c_str());
-
-        DynamicalOverrides dyn_ovr;
-        dyn_ovr.shell_core_mult = LHS021_SHELL_CORE_MULT;
-        dyn_ovr.core_core_mult = LHS021_CORE_CORE_MULT;
-        dyn_ovr.adapt_inc = inc_val;
-        dyn_ovr.adapt_tau = tau_val;
-        dyn_ovr.nmda_tau = FIXED_NMDA_TAU;
-
-        double prev_stim = -1;
-        if (pt.tau_idx >= 0 && last_stim_by_tau.count(pt.tau_idx))
-            prev_stim = last_stim_by_tau[pt.tau_idx];
-
-        SimConfig cal_sim = sim_cfg;
-        double lo = CALIBRATION_STIM_LO, hi = CALIBRATION_STIM_HI;
-        if (prev_stim > 0) {
-            lo = std::max(lo, prev_stim / 3.0);
-            hi = std::min(hi, prev_stim * 3.0);
-        }
-
-        auto [matched_stim, cal_rate, cal_log] =
-            calibrate_stimulus_current(base_cfg, dyn_ovr, cal_samples, cal_sim,
-                                       n_workers, target_rate_hz, lo, hi,
-                                       prev_stim > 0 ? prev_stim : -1);
-
-        if (std::abs(cal_rate - target_rate_hz) > RATE_TOLERANCE_HZ) {
-            std::tie(matched_stim, cal_rate, cal_log) =
-                calibrate_stimulus_current(base_cfg, dyn_ovr, cal_samples, cal_sim,
-                                           n_workers, target_rate_hz);
-        }
-
-        if (pt.tau_idx >= 0) last_stim_by_tau[pt.tau_idx] = matched_stim;
-        printf("    Calibrated: stim=%.4f -> %.1f Hz\n", matched_stim, cal_rate);
-
-        SimConfig eval_sim = sim_cfg;
-        eval_sim.stimulus_current = matched_stim;
-
+    // ============================================================
+    // EVALUATE ONE BRANCH — shared helper for Branch A and B
+    // ============================================================
+    auto evaluate_branch = [&](const GridPoint& pt,
+                               const DynamicalOverrides& dyn_ovr,
+                               const SimConfig& eval_sim,
+                               const std::string& branch,
+                               double cal_value,    // matched_stim (A) or bg_current (B)
+                               double cal_rate) -> std::string {
         double t0 = now_seconds();
-        auto res = run_all_samples(base_cfg, samples, dyn_ovr, eval_sim, n_workers);
+        double bg = (branch == "B_matched") ? cal_value : 0.0;
+        auto res = run_all_samples(base_cfg, samples, dyn_ovr, eval_sim, n_workers, true, bg);
         double sim_time = now_seconds() - t0;
 
         double rate_mean = 0, rate_std = 0;
@@ -1374,21 +1338,23 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
 
         auto per_bin_acc = classify_per_bin(res.res_bins_list, y, eval_n_bins, res.n_reservoir);
 
-        printf("    Rate: %.1f Hz | Acc: %.1f%% (gap=%+.1fpp %s) | ISI CV: %.3f | PR: %.4f\n",
-               rate_mean, cls_res.accuracy * 100, stats.gap_pp, stats.stars.c_str(),
+        printf("    [%s] Rate: %.1f Hz | Acc: %.1f%% (gap=%+.1fpp %s) | ISI CV: %.3f | PR: %.4f\n",
+               branch.c_str(), rate_mean, cls_res.accuracy * 100, stats.gap_pp, stats.stars.c_str(),
                isi_cv_mean, pr_mean);
 
         std::ostringstream oss;
         oss << "{";
+        oss << "\"branch\": \"" << branch << "\", ";
         oss << "\"point_id\": \"" << pt.point_id << "\", ";
         oss << "\"source\": \"" << pt.source << "\", ";
         oss << "\"inc_idx\": " << pt.inc_idx << ", ";
         oss << "\"tau_idx\": " << pt.tau_idx << ", ";
         oss << std::fixed;
         oss.precision(10);
-        oss << "\"adapt_inc\": " << inc_val << ", ";
-        oss << "\"adapt_tau\": " << tau_val << ", ";
-        oss << "\"matched_stimulus_current\": " << matched_stim << ", ";
+        oss << "\"adapt_inc\": " << pt.adapt_inc << ", ";
+        oss << "\"adapt_tau\": " << pt.adapt_tau << ", ";
+        oss << "\"stimulus_current\": " << eval_sim.stimulus_current << ", ";
+        oss << "\"background_current\": " << bg << ", ";
         oss << "\"calibration_rate_hz\": " << cal_rate << ", ";
         oss << "\"classification_accuracy\": " << cls_res.accuracy << ", ";
         oss.precision(6);
@@ -1421,7 +1387,84 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
         oss << "]";
         oss << "}";
 
-        grid_results_json.push_back({{"json", oss.str()}});
+        return oss.str();
+    };
+
+    // 5. Sweep — two branches per grid point
+    printf("\n[4] Running %d grid points x 2 branches...\n", n_grid);
+    printf("    Branch A: Unmatched (natural rate, fixed stim=%.4f)\n", sim_cfg.stimulus_current);
+    printf("    Branch B: Background-current-matched (target=%.1f +/- %.0f Hz)\n",
+           target_rate_hz, RATE_TOLERANCE_HZ);
+
+    std::vector<std::map<std::string, std::string>> grid_results_json;
+    std::vector<double> grid_point_times;
+    double sweep_start = now_seconds();
+    std::map<int, double> last_bg_by_tau;  // warm-start for Branch B calibration
+
+    for (int pt_num = 0; pt_num < n_grid; pt_num++) {
+        auto& pt = grid_points[pt_num];
+        double inc_val = pt.adapt_inc;
+        double tau_val = pt.adapt_tau;
+
+        double gp_start = now_seconds();
+
+        std::string eta_str = "calculating...";
+        if (!grid_point_times.empty()) {
+            int last_n = std::min((int)grid_point_times.size(), 10);
+            double avg_t = 0;
+            for (int i = (int)grid_point_times.size() - last_n; i < (int)grid_point_times.size(); i++)
+                avg_t += grid_point_times[i];
+            avg_t /= last_n;
+            double eta_h = avg_t * (n_grid - pt_num) / 3600.0;
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%.1fh", eta_h);
+            eta_str = buf;
+        }
+
+        printf("\n  [%d/%d] inc=%.4f, tau=%.1fms  |  ETA: %s\n",
+               pt_num + 1, n_grid, inc_val, tau_val, eta_str.c_str());
+
+        DynamicalOverrides dyn_ovr;
+        dyn_ovr.shell_core_mult = LHS021_SHELL_CORE_MULT;
+        dyn_ovr.core_core_mult = LHS021_CORE_CORE_MULT;
+        dyn_ovr.adapt_inc = inc_val;
+        dyn_ovr.adapt_tau = tau_val;
+        dyn_ovr.nmda_tau = FIXED_NMDA_TAU;
+
+        // --- Branch A: Unmatched (natural rate) ---
+        // stimulus_current fixed at INPUT_STIM_CURRENT, no background current
+        {
+            SimConfig eval_a = sim_cfg;  // stim already set to INPUT_STIM_CURRENT
+            // Measure natural rate for reporting (use calibration subset for speed)
+            double natural_rate = measure_rate(base_cfg, cal_samples, dyn_ovr, eval_a, n_workers);
+            printf("    [A] Natural rate: %.1f Hz (stim=%.4f, no bg)\n",
+                   natural_rate, eval_a.stimulus_current);
+
+            auto json = evaluate_branch(pt, dyn_ovr, eval_a, "A_unmatched",
+                                         eval_a.stimulus_current, natural_rate);
+            grid_results_json.push_back({{"json", json}});
+        }
+
+        // --- Branch B: Background-current-matched ---
+        // stimulus_current fixed at INPUT_STIM_CURRENT, calibrate bg_current
+        {
+            SimConfig eval_b = sim_cfg;  // stim fixed
+
+            double prev_bg = 0.0;
+            if (pt.tau_idx >= 0 && last_bg_by_tau.count(pt.tau_idx))
+                prev_bg = last_bg_by_tau[pt.tau_idx];
+
+            auto [matched_bg, bg_cal_rate, bg_cal_log] =
+                calibrate_background_current(base_cfg, dyn_ovr, cal_samples, eval_b,
+                                              n_workers, target_rate_hz, prev_bg);
+
+            if (pt.tau_idx >= 0) last_bg_by_tau[pt.tau_idx] = matched_bg;
+            printf("    [B] Calibrated: bg=%.4f -> %.1f Hz\n", matched_bg, bg_cal_rate);
+
+            auto json = evaluate_branch(pt, dyn_ovr, eval_b, "B_matched",
+                                         matched_bg, bg_cal_rate);
+            grid_results_json.push_back({{"json", json}});
+        }
 
         double gp_elapsed = now_seconds() - gp_start;
         grid_point_times.push_back(gp_elapsed);
@@ -1438,7 +1481,8 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
     printf("\n======================================================================\n");
     printf("  SWEEP COMPLETE\n");
     printf("  Total time: %.0fs (%.1f hours)\n", total_time, total_time / 3600.0);
-    printf("  Grid points: %d/%d\n", (int)grid_results_json.size(), n_grid);
+    printf("  Grid points: %d results (%d grid x 2 branches)\n",
+           (int)grid_results_json.size(), n_grid);
     printf("======================================================================\n");
 
     save_checkpoint(output_dir, grid_results_json, bsa_json, baseline_json,

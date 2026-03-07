@@ -64,6 +64,11 @@ public:
     // Dynamic state
     std::vector<double> v, g_e, g_i, g_i_slow, g_nmda, adaptation, t_since_spike;
 
+    // Tonic background current (nA) — applied per-neuron each timestep.
+    // Used for rate-matching without modulating input encoding.
+    // Positive = depolarizing (increases rate), negative = hyperpolarizing.
+    std::vector<double> background_current;
+
     // Decay factors
     std::vector<double> exp_decay_e, exp_decay_i, exp_decay_i_slow;
     std::vector<double> exp_decay_adapt, exp_decay_nmda;

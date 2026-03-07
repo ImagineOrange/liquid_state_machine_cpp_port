@@ -398,6 +398,8 @@ std::vector<int> SphericalNetwork::update_network(double dt) {
     const double* __restrict__ pdecnmda = exp_decay_nmda.data();
     const double* __restrict__ pdecadapt = exp_decay_adapt.data();
     double* __restrict__ ptss = t_since_spike.data();
+    const bool has_bg = !background_current.empty();
+    const double* __restrict__ pbg = has_bg ? background_current.data() : nullptr;
 
     // 2-6: Fused loop — refractory, membrane dynamics, conductance decay,
     //       synaptic noise, spike detection — single pass over neurons.
@@ -419,7 +421,8 @@ std::vector<int> SphericalNetwork::update_network(double dt) {
         double i_nmda = pgnmda[i] * mg_block * (perev[i] - vi);
         double i_adapt = padapt[i] * (pkrev[i] - vi);
 
-        double dv = dt * ((-(vi - pvrest[i]) / ptaum[i]) + i_e + i_nmda + i_i + i_is + i_adapt);
+        double i_bg = has_bg ? pbg[i] : 0.0;
+        double dv = dt * ((-(vi - pvrest[i]) / ptaum[i]) + i_e + i_nmda + i_i + i_is + i_adapt + i_bg);
         vi += dv;
         double vn = rng_normal() * pvnoise[i];
         vi += vn;

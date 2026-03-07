@@ -50,11 +50,12 @@ inline const double LHS021_SHELL_CORE_MULT = 4.849737508561994;
 inline const double FIXED_NMDA_TAU = 50.0;
 
 // Rate-matching
+// Target: sensory cortex evoked firing rate during auditory processing.
+// Auditory cortex neurons fire at ~10-40 Hz during stimulus presentation
+// (Hromádka et al. 2008, DeWeese et al. 2003). 20 Hz is mid-range.
+inline const double RATE_TARGET_HZ = 20.0;
 inline const double RATE_TOLERANCE_HZ = 2.0;
 inline const int CALIBRATION_N_SAMPLES = 200;
-inline const int CALIBRATION_MAX_ITER = 100;
-inline const double CALIBRATION_STIM_LO = 0.01;
-inline const double CALIBRATION_STIM_HI = 5.0;
 
 // ============================================================
 // SHARED HELPERS

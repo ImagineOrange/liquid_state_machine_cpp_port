@@ -26,27 +26,39 @@ score = 0                                                 (otherwise)
 | `stim_current` | 20 | 0.01 – 5.0 | log |
 | `input_tau_e` | 10 | 0.05 – 12.0 ms | log |
 | `input_adapt_inc` | 8 | 0 + 7 log-spaced 0.005 – 5.0 | log |
-| `(input_std_u, input_std_tau_rec)` | 5 | pairs incl. no-STD baseline | — |
+| `(input_std_u, input_std_tau_rec)` | 5 | see below | — |
+
+**STD pairs** (short-term depression on BSA→input injection):
+
+| Pair | `input_std_u` | `input_std_tau_rec` (ms) |
+|------|---------------|--------------------------|
+| 0 (baseline) | 0.0 | 0.0 |
+| 1 | 0.10 | 30.0 |
+| 2 | 0.15 | 80.0 |
+| 3 | 0.25 | 50.0 |
+| 4 | 0.35 | 120.0 |
 
 **Total**: 20 x 10 x 8 x 5 = **8,000 grid points** x 30 samples (6 per digit, digits 0–4) = 240,000 simulations.
 
-**Fixed parameters** (LHS-021 baseline):
-- `shell_core_mult = 4.85`
-- `core_core_mult = 0.83`
-- `adapt_inc = 0.626` (reservoir; input neurons override this)
+**Fixed parameters** (LHS-021 baseline, defined in `src/inc/experiments.h`):
+- `shell_core_mult = 4.8497`
+- `core_core_mult = 0.8275`
+- `adapt_inc = 0.6264` (reservoir; input neurons override this)
 - `nmda_tau = 50.0`
-- Input NMDA: **disabled**
+- `lambda_connect = 0.003288`
+- Input NMDA: **disabled** (`skip_stim_nmda = true`)
 - Recurrent STD: U=0.1, tau_rec=500ms (on reservoir E→E connections)
+- Noise: v_noise_amp=0.1, i_noise_amp=0.001 (base config defaults)
 
 ## Optimal parameters
 
-| Rank | stim_current | tau_e (ms) | adapt_inc | std_u | MI (bits) | r@20ms | Rate (Hz) | Score |
-|------|-------------|------------|-----------|-------|-----------|--------|-----------|-------|
-| 1 | **0.0518** | **1.05** | **0.0** | 0.0 | 1.057 | 0.884 | 84.7 | **1.236** |
-| 2 | 0.2683 | 0.17 | 0.0 | 0.0 | 1.058 | 0.881 | 86.2 | 1.236 |
-| 3 | 0.5179 | 0.05 | 0.0 | 0.0 | 1.054 | 0.877 | 87.0 | 1.232 |
-| 4 | 0.0268 | 1.93 | 0.0 | 0.0 | 1.052 | 0.880 | 83.7 | 1.231 |
-| 5 | 1.9307 | 0.31 | 0.0 | 0.10 | 1.065 | 0.756 | 94.0 | 1.223 |
+| Rank | stim_current | tau_e (ms) | adapt_inc | std_u | std_tau_rec (ms) | MI (bits) | r@20ms | Rate (Hz) | Score |
+|------|-------------|------------|-----------|-------|------------------|-----------|--------|-----------|-------|
+| 1 | **0.0518** | **1.05** | **0.0** | 0.0 | 0.0 | 1.057 | 0.884 | 84.7 | **1.236** |
+| 2 | 0.2683 | 0.17 | 0.0 | 0.0 | 0.0 | 1.058 | 0.881 | 86.2 | 1.236 |
+| 3 | 0.5179 | 0.05 | 0.0 | 0.0 | 0.0 | 1.054 | 0.877 | 87.0 | 1.232 |
+| 4 | 0.0268 | 1.93 | 0.0 | 0.0 | 0.0 | 1.052 | 0.880 | 83.7 | 1.231 |
+| 5 | 1.9307 | 0.31 | 0.0 | 0.10 | 30.0 | 1.065 | 0.756 | 94.0 | 1.223 |
 
 ## Top 50 analysis
 
@@ -74,7 +86,8 @@ The top 50 configurations occupy a narrow performance band (score 1.172–1.236)
 
 | File | Description |
 |------|-------------|
-| `input_grid_results.csv` | Full 8,000-point grid search results |
+| `input_grid_results.csv` | Full 8,000-point grid search results (21 columns) |
+| `mi_refine_top50.csv` | MI refinement of top 50 configs across 4 bin widths (5/10/20/50ms) x 4 quantile levels (4/8/16/32) |
 | `tsne_parameter_space.png` | t-SNE embedding colored by score, MI, and rate |
 | `input_grid_results_heatmaps.png` | Composite score heatmaps: stim x tau_e at each adapt_inc |
 | `input_grid_results_profiles.png` | 1D metric profiles along each axis |
