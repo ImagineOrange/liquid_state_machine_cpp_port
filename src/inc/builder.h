@@ -15,7 +15,11 @@ constexpr double SURFACE_SHELL_FRACTION = 0.15;
 constexpr double RING_LATITUDE_BAND = 0.40;
 constexpr int ARC_DEGREES = 300;
 constexpr int ARC_GAP_CENTER_DEG = 180;
-constexpr int OVERLAP_K = 5;
+constexpr int OVERLAP_K = 4;
+
+// Gaussian tuning curve: sigma in units of channel spacing.
+// sigma=1.5 means weight drops to ~0.80 at 1 channel, ~0.41 at 2, ~0.14 at 3.
+constexpr double TUNING_SIGMA_CHANNELS = 1.5;
 
 // Config B constants
 constexpr double WEIGHT_MULT = 5.0;
@@ -28,6 +32,7 @@ struct ZoneInfo {
     std::vector<int> input_zone_indices;
     std::vector<int> reservoir_zone_indices;
     std::map<int, std::vector<int>> input_neuron_mapping;
+    std::map<int, std::vector<double>> input_neuron_weights;  // Gaussian tuning weights, parallel to mapping
     std::vector<int> input_neuron_indices;
     double y_threshold;
     double sphere_radius;

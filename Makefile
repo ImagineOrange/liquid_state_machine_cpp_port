@@ -23,6 +23,8 @@ INCDIR = src/inc
 
 # Source files
 SRCS = $(SRCDIR)/main.cpp \
+       $(SRCDIR)/input_grid.cpp \
+       $(SRCDIR)/classification.cpp \
        $(SRCDIR)/ml.cpp \
        $(SRCDIR)/network.cpp \
        $(SRCDIR)/builder.cpp \

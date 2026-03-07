@@ -1,0 +1,12 @@
+{
+  "dt": 0.1000,
+  "audio_duration_ms": 314.12,
+  "post_stimulus_ms": 200.00,
+  "total_ms": 514.12,
+  "stim_current": 0.015800,
+  "n_input": 124,
+  "n_reservoir": 604,
+  "n_total": 728,
+  "digit": 0,
+  "filename": "spike_train_0_george_0"
+}

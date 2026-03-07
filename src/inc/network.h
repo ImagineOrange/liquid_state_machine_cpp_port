@@ -106,9 +106,13 @@ public:
     std::vector<TraceRow> trace;
 
     // Activity tracking
-    std::vector<int> network_activity;
+    int step_counter = 0;
+    std::vector<int> network_activity;  // kept for callers that read it; not grown in hot path
     int current_avalanche_size = 0;
     int current_avalanche_start = -1;
+
+    // Persistent scratch buffers (avoid per-step allocation)
+    std::vector<bool> _refractory;
 
     // Connection stats
     int attempted_connections = 0;

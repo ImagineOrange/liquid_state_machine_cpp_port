@@ -344,10 +344,10 @@ std::vector<int> SphericalNetwork::update_network(double dt) {
     if (cached_dt != dt) precompute_decay_factors(dt);
     if (!ring_initialized) init_ring_buffer(dt);
 
-    int current_step = (int)network_activity.size();
+    int current_step = step_counter;
     int slot = current_step % ring_size;
 
-    // 1. Deliver due spikes
+    // 1. Deliver due spikes from ring buffer
     if (!ring_targets[slot].empty()) {
         int n_deliver = (int)ring_targets[slot].size();
         for (int k = 0; k < n_deliver; k++) {
@@ -370,97 +370,118 @@ std::vector<int> SphericalNetwork::update_network(double dt) {
         ring_slow_inh[slot].clear();
     }
 
-    // 2. Refractory mask
-    std::vector<bool> refractory(n_neurons);
-    for (int i = 0; i < n_neurons; i++) {
-        refractory[i] = t_since_spike[i] < tau_ref[i];
-        t_since_spike[i] += dt;
-    }
+    // Ensure persistent refractory buffer is sized
+    if ((int)_refractory.size() != n_neurons)
+        _refractory.resize(n_neurons);
 
-    // 3. Membrane dynamics
-    double trace_v_noise = 0.0;
+    // Pointers into contiguous arrays for cache-friendly access
+    double* __restrict__ pv  = v.data();
+    double* __restrict__ pge = g_e.data();
+    double* __restrict__ pgi = g_i.data();
+    double* __restrict__ pgis = g_i_slow.data();
+    double* __restrict__ pgnmda = g_nmda.data();
+    double* __restrict__ padapt = adaptation.data();
+    const double* __restrict__ pvrest = v_rest.data();
+    const double* __restrict__ pvthr = v_threshold.data();
+    const double* __restrict__ pvrst = v_reset.data();
+    const double* __restrict__ ptaum = tau_m.data();
+    const double* __restrict__ ptref = tau_ref.data();
+    const double* __restrict__ perev = e_reversal_arr.data();
+    const double* __restrict__ pirev = i_reversal_arr.data();
+    const double* __restrict__ pkrev = k_reversal_arr.data();
+    const double* __restrict__ pvnoise = v_noise_amp_arr.data();
+    const double* __restrict__ pinoise = i_noise_amp_arr.data();
+    const double* __restrict__ padaptinc = adaptation_increment.data();
+    const double* __restrict__ pdece = exp_decay_e.data();
+    const double* __restrict__ pdeci = exp_decay_i.data();
+    const double* __restrict__ pdecis = exp_decay_i_slow.data();
+    const double* __restrict__ pdecnmda = exp_decay_nmda.data();
+    const double* __restrict__ pdecadapt = exp_decay_adapt.data();
+    double* __restrict__ ptss = t_since_spike.data();
+
+    // 2-6: Fused loop — refractory, membrane dynamics, conductance decay,
+    //       synaptic noise, spike detection — single pass over neurons.
+    double trace_v_noise = 0.0, trace_ge_noise = 0.0, trace_gi_noise = 0.0;
+    std::vector<int> active;
+    active.reserve(32);
+
     for (int i = 0; i < n_neurons; i++) {
-        double vi = v[i];
-        double i_e = g_e[i] * (e_reversal_arr[i] - vi);
-        double i_i = g_i[i] * (i_reversal_arr[i] - vi);
-        double i_is = g_i_slow[i] * (i_reversal_arr[i] - vi);
+        // Refractory check
+        bool ref = ptss[i] < ptref[i];
+        ptss[i] += dt;
+
+        // Membrane dynamics
+        double vi = pv[i];
+        double i_e = pge[i] * (perev[i] - vi);
+        double i_i = pgi[i] * (pirev[i] - vi);
+        double i_is = pgis[i] * (pirev[i] - vi);
         double mg_block = 1.0 / (1.0 + _mg_factor * std::exp(-0.062 * vi));
-        double i_nmda = g_nmda[i] * mg_block * (e_reversal_arr[i] - vi);
-        double i_adapt = adaptation[i] * (k_reversal_arr[i] - vi);
+        double i_nmda = pgnmda[i] * mg_block * (perev[i] - vi);
+        double i_adapt = padapt[i] * (pkrev[i] - vi);
 
-        double dv = dt * ((-(vi - v_rest[i]) / tau_m[i]) + i_e + i_nmda + i_i + i_is + i_adapt);
-        v[i] += dv;
-        double vn = rng_normal() * v_noise_amp_arr[i];
-        v[i] += vn;
+        double dv = dt * ((-(vi - pvrest[i]) / ptaum[i]) + i_e + i_nmda + i_i + i_is + i_adapt);
+        vi += dv;
+        double vn = rng_normal() * pvnoise[i];
+        vi += vn;
 
+        // Clamp if refractory
+        if (ref) vi = pvrst[i];
+        pv[i] = vi;
+
+        // Decay conductances
+        pge[i]    *= pdece[i];
+        pgi[i]    *= pdeci[i];
+        pgis[i]   *= pdecis[i];
+        pgnmda[i] *= pdecnmda[i];
+        padapt[i] *= pdecadapt[i];
+
+        // Synaptic noise
+        double ne = rng_normal() * pinoise[i];
+        double ni = rng_normal() * pinoise[i];
+        if (ne > 0) pge[i] += ne;
+        if (ni > 0) pgi[i] += ni;
+
+        // Spike detection
+        if (vi >= pvthr[i] && !ref) {
+            active.push_back(i);
+        }
+
+        // Trace recording (rare — only when trace_neuron_id is set)
         if (i == trace_neuron_id) {
             trace_v_noise = vn;
-        }
-    }
-
-    // Clamp refractory
-    for (int i = 0; i < n_neurons; i++) {
-        if (refractory[i]) v[i] = v_reset[i];
-    }
-
-    // 4. Decay conductances
-    for (int i = 0; i < n_neurons; i++) {
-        g_e[i] *= exp_decay_e[i];
-        g_i[i] *= exp_decay_i[i];
-        g_i_slow[i] *= exp_decay_i_slow[i];
-        g_nmda[i] *= exp_decay_nmda[i];
-        adaptation[i] *= exp_decay_adapt[i];
-    }
-
-    // 5. Synaptic noise
-    double trace_ge_noise = 0.0, trace_gi_noise = 0.0;
-    for (int i = 0; i < n_neurons; i++) {
-        double ne = rng_normal() * i_noise_amp_arr[i];
-        double ni = rng_normal() * i_noise_amp_arr[i];
-        if (ne > 0) g_e[i] += ne;
-        if (ni > 0) g_i[i] += ni;
-        if (i == trace_neuron_id) {
             trace_ge_noise = ne > 0 ? ne : 0.0;
             trace_gi_noise = ni > 0 ? ni : 0.0;
         }
     }
 
-    // 6. Spike detection
-    std::vector<int> active;
-    for (int i = 0; i < n_neurons; i++) {
-        if (v[i] >= v_threshold[i] && !refractory[i]) {
-            active.push_back(i);
-        }
-    }
-
     // 7. Post-spike updates
     for (int idx : active) {
-        v[idx] = v_reset[idx];
-        t_since_spike[idx] = 0.0;
-        adaptation[idx] += adaptation_increment[idx];
+        pv[idx] = pvrst[idx];
+        ptss[idx] = 0.0;
+        padapt[idx] += padaptinc[idx];
     }
 
     // 8. Record trace for target neuron
     if (trace_neuron_id >= 0 && trace_neuron_id < n_neurons) {
         int ti = trace_neuron_id;
-        double vi = v[ti];
-        double ie = g_e[ti] * (e_reversal_arr[ti] - vi);
-        double ii = g_i[ti] * (i_reversal_arr[ti] - vi);
-        double iis = g_i_slow[ti] * (i_reversal_arr[ti] - vi);
+        double vi = pv[ti];
+        double ie = pge[ti] * (perev[ti] - vi);
+        double ii = pgi[ti] * (pirev[ti] - vi);
+        double iis = pgis[ti] * (pirev[ti] - vi);
         double mgb = 1.0 / (1.0 + _mg_factor * std::exp(-0.062 * vi));
-        double inmda = g_nmda[ti] * mgb * (e_reversal_arr[ti] - vi);
-        double iadapt = adaptation[ti] * (k_reversal_arr[ti] - vi);
+        double inmda = pgnmda[ti] * mgb * (perev[ti] - vi);
+        double iadapt = padapt[ti] * (pkrev[ti] - vi);
         bool spiked = false;
         for (int idx : active) { if (idx == ti) { spiked = true; break; } }
-        trace.push_back({v[ti], g_e[ti], g_i[ti], g_i_slow[ti], g_nmda[ti], adaptation[ti],
+        trace.push_back({pv[ti], pge[ti], pgi[ti], pgis[ti], pgnmda[ti], padapt[ti],
                          ie, ii, iis, inmda, iadapt,
                          trace_v_noise, trace_ge_noise, trace_gi_noise, spiked});
     }
 
-    // 8. Activity tracking
-    network_activity.push_back((int)active.size());
+    // 9. Step counter
+    step_counter++;
 
-    // 9. Queue new spikes
+    // 10. Queue new spikes into ring buffer
     if (!active.empty()) {
         for (int nid : active) {
             int64_t start = csr_indptr[nid];
@@ -488,6 +509,7 @@ void SphericalNetwork::reset_all() {
     trace.clear();
     for (int i = 0; i < n_neurons; i++) t_since_spike[i] = tau_ref[i] + 1e-5;
 
+    step_counter = 0;
     network_activity.clear();
     current_avalanche_size = 0;
     current_avalanche_start = -1;

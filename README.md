@@ -1,72 +1,157 @@
-# Classification Adaptation Sweep (C++ Port)
+# Liquid State Machine — C++ Port
 
-A high-performance C++ port of a Liquid State Machine (LSM) reservoir computing system for spoken digit classification. Sweeps across spike-frequency adaptation (SFA) parameters to study how adaptation dynamics affect classification accuracy.
-
-## What it does
-
-1. Loads BSA-encoded audio spike trains (digits 0-4, 500 samples per digit)
-2. Builds a 1000-neuron LIF spiking network arranged in a 3D sphere with conductance-based synapses (AMPA, GABA, NMDA)
-3. Establishes a baseline firing rate from an LHS-021 reference configuration
-4. Sweeps a 159-point grid over `(adaptation_increment, adaptation_tau)`, rate-matching each point via binary search calibration
-5. Classifies reservoir activity using SVD-based ridge regression (one-vs-rest, 60/40 stratified split x 5 repeats)
-6. Outputs per-point accuracy, ISI CV, participation ratio, and per-bin accuracy as JSON
+A high-performance C++ implementation of a biologically-detailed Liquid State Machine (LSM) for spoken digit classification. This port replicates and extends the Python-based reservoir computing system from `phase_1_Networks_of_LIF_neurons/liquid_state_machine_expanded/`, providing ~100x speedup for parameter sweeps and grid searches.
 
 ## The network
 
-The reservoir is a **1000-neuron Leaky Integrate-and-Fire (LIF)** spiking network embedded in a 3D sphere. Neurons are positioned uniformly inside the sphere, and connection probability falls off with Euclidean distance.
+The reservoir is a **604-neuron LIF spiking network** (compacted from 1000) embedded in a 3D sphere. Neurons have conductance-based synapses with three excitatory channels (fast AMPA, slow NMDA with voltage-dependent Mg2+ block) and two inhibitory channels (fast GABA-A, slow GABA-B). Spike-frequency adaptation is modeled as a potassium-like afterhyperpolarization current. All biophysical parameters are jittered across neurons.
 
-**Neuron model.** Each neuron has conductance-based synapses with three excitatory channels (fast AMPA, slow NMDA with voltage-dependent Mg2+ block) and two inhibitory channels (fast GABA-A, slow GABA-B for designated slow-inhibitory neurons). Spike-frequency adaptation (SFA) is modeled as a potassium-like afterhyperpolarization current with per-neuron `adaptation_increment` and `tau_adaptation`. All biophysical parameters (resting potential, threshold, time constants, etc.) are jittered across neurons using Gaussian or log-normal distributions and clipped to biologically plausible ranges.
+The sphere is divided into two functional zones:
 
-**Topology.** The sphere is divided into two functional zones:
+- **Input shell** — excitatory neurons on the outer surface, arranged into a 300-degree azimuthal arc. These are tonotopically mapped to 128 mel-frequency bins via Gaussian tuning curves (see below).
+- **Reservoir core** — interior neurons receiving feedforward input from the shell. Intra-shell and feedback connections are removed, forcing signal flow inward.
 
-- **Input shell** — excitatory neurons on the outer surface, arranged into an arc spanning 300 degrees of azimuthal angle. These are tonotopically mapped to 128 mel-frequency bins using k=5 nearest-neighbor overlap, receiving BSA-encoded audio spike trains as excitatory current injections.
-- **Reservoir core** — all interior neurons. These receive feedforward input from the shell but do not project back (no feedback in the default connectivity regime). Intra-shell connections are also removed, forcing signal flow inward.
+Excitatory recurrent connections undergo short-term depression (Tsodyks-Markram, U=0.1, tau_rec=500ms). Transmission delays are distance-dependent via ring buffer.
 
-After construction, non-arc shell neurons are compacted out, leaving only the arc input neurons and the reservoir core.
+The network is loaded from a deterministic Python-exported snapshot (`network_snapshot.npz`) for bit-identical topology across implementations.
 
-**Synaptic dynamics.** Excitatory recurrent connections in the reservoir undergo short-term depression (STD) with Tsodyks-Markram dynamics (`U = 0.1`, `tau_rec = 500 ms`), reducing synaptic efficacy with repeated presynaptic firing. Transmission delays are distance-dependent, delivered via a ring buffer.
+## Gaussian frequency tuning curves
 
-**Snapshot loading.** By default, the network is loaded from a Python-exported `.npz` snapshot (`network_snapshot.npz` next to the binary), bypassing all RNG-dependent construction for bit-identical topology across implementations. Use `--no-snapshot` to build from RNG instead, or `--snapshot <path>` to specify a different snapshot file.
+Input neurons receive BSA-encoded audio via **Gaussian-weighted frequency tuning**, replacing the original flat/equal overlap scheme. This preserves frequency-specific information through the input layer.
 
-## The task
+**How it works:**
 
-The system performs **5-class spoken digit classification** (digits 0-4) using reservoir computing.
+1. **Quantile-based channel centers.** 128 mel-frequency bin centers are placed at evenly-spaced quantiles of the input neuron phi (azimuthal angle) distribution. This compresses the full frequency spectrum onto the populated arc, eliminating coverage gaps from irregular neuron spacing.
 
-**Input.** Audio recordings are pre-processed offline into BSA (Ben's Spiker Algorithm) spike trains — each sample is a set of spike times with associated mel-frequency bin indices. 500 samples per digit (2500 total) are loaded from `.npz` files.
+2. **Neuron-to-bins mapping.** Each input neuron selects its K=4 nearest frequency bin centers (by phi distance). This guarantees every neuron maps to exactly K bins — uniform receptive field size.
 
-**Simulation.** Each audio sample is presented to the network by injecting excitatory current into the mapped input neurons at the corresponding spike times. The network runs for the audio duration plus a 200 ms post-stimulus window (dt = 0.1 ms). Reservoir neuron spikes are recorded at each timestep.
+3. **Gaussian weighting.** Each mapping gets weight `w = exp(-d^2 / (2*sigma^2))` where `d` is the phi-distance between neuron and channel center, and `sigma = 1.5 * avg_neuron_spacing`. At this sigma: center weight = 1.0, 1 channel away = 0.80, 2 channels = 0.41, 3 channels = 0.14.
 
-**Feature extraction.** Reservoir spike activity is binned into 20 ms time windows, producing a `(n_bins x n_reservoir)` spike count matrix per sample. These are flattened into a single feature vector for classification.
+4. **Injection.** During simulation, BSA spikes in frequency bin `m` are injected into all neurons mapped to bin `m`, scaled by their tuning weight: `I = stim_current * w`.
 
-**Classification.** An SVD-based ridge classifier (one-vs-rest with {-1, +1} targets) is trained on 60% of samples and tested on 40%, using stratified shuffle splits repeated 5 times. Ridge regularization alpha is selected from {0.01, 0.1, 1, 10, 100, 1000} by best test accuracy.
+**Coverage:** K=4 with quantile centers achieves 128/128 bin coverage (every bin has at least one mapped neuron), with mean weight 0.859 and zero wasted weights.
 
-**Rate matching.** To isolate the effect of adaptation parameters from trivial firing rate changes, each grid point is calibrated via binary search over stimulus current to match the baseline LHS-021 firing rate (within ±2 Hz).
+**Key parameters** (defined in `src/inc/builder.h`):
+- `OVERLAP_K = 4` — bins per neuron
+- `TUNING_SIGMA_CHANNELS = 1.5` — Gaussian sigma in units of channel spacing
 
-**Metrics.** Per grid point: classification accuracy (mean/std over 5 repeats), gap vs BSA baseline (paired t-test, bootstrap CI, Cohen's d), firing rate, ISI coefficient of variation, mean adaptation conductance at stimulus end, PCA participation ratio, and per-bin accuracy curves.
+## Experiments
+
+### 1. Python-to-C++ behavioral verification
+
+Confirms the C++ port is behaviorally equivalent to the Python implementation — a prerequisite for trusting all downstream experiments. Both implementations run 500 samples through identical topology; per-sample spike count correlation is r = 0.992 and the 2.4pp accuracy gap is within classifier variance.
+
+**Results:** C++ fires at 35.3 Hz (vs 34.3 Hz Python), classifies at 85.6% (vs 88.0%). Statistically equivalent.
+
+**Files:** `results/verification_python_to_cpp/`
+
+### 2. Input neuron regime grid search
+
+The input shell converts continuous BSA spike trains into the reservoir's spiking language — if it destroys frequency information, no downstream processing can recover it. This 8,000-point grid search over `(stim_current, tau_e, adapt_inc, STD params)` finds the input neuron dynamical regime that maximizes mutual information between BSA input and output spikes while staying in a biologically plausible firing regime.
+
+**Results:** Optimal params are `stim=0.0158, tau_e=1.93ms, adapt_inc=0.005, no STD`. MI ≥ 1.18 bits (8-quantile, 20ms bins); refinement at higher quantile counts (q16: ~1.50, q32: ~1.93) shows the estimate is binning-limited. The top 50 configs form a broad plateau with <0.05 bit spread — the optimum is robust, not fragile.
+
+**Files:** `results/input_grid_search/`
+
+### 3. Top configuration comparison
+
+Visual sanity check — traces a single input neuron (493) through 6 candidate configurations on the same audio sample to verify that the grid search optimum produces qualitatively reasonable membrane dynamics rather than a degenerate regime.
+
+**Files:** `results/top_config_comparison/`
+
+### 4. Single-neuron diagnostics
+
+Detailed state-variable traces (V, g_e, g_i, g_nmda, adaptation, all currents) for input and reservoir neurons at the optimal grid search parameters. Confirms the full BSA→conductance→spike transformation chain works as expected.
+
+**Results:** Input neuron 493 achieves r(g_e, BSA) = 0.920 and r(spike, BSA)@20ms = 0.906 — excitatory conductance faithfully tracks BSA input, and spike output preserves most of that correlation.
+
+**Files:** `results/neuron_diagnostics/`
+
+### 5. Classification adaptation sweep (main experiment)
+
+The core scientific question: does spike-frequency adaptation improve reservoir computation? This 159-point sweep over `(adaptation_increment, adaptation_tau)` measures 5-class spoken digit classification accuracy, with each grid point rate-matched to a baseline firing rate via binary search over stimulus current to isolate the effect of adaptation dynamics.
+
+**Readout:** SVD-based ridge regression (one-vs-rest), 20ms time bins flattened, 5-fold stratified CV x 5 repeats.
+
+**Files:** `results/classification_adaptation_sweep/`
 
 ## Project structure
 
 ```
 ├── src/
 │   ├── inc/
-│   │   ├── common.h          # Shared utilities (RNG, Mat, SVD, JSON helpers)
-│   │   ├── network.h         # SphericalNetwork (LIF neurons, CSR connectivity, ring buffer)
-│   │   ├── builder.h         # Network construction, zone topology, simulation driver
+│   │   ├── common.h          # RNG, matrix ops, SVD, JSON helpers
+│   │   ├── network.h         # SphericalNetwork: LIF dynamics, CSR connectivity, ring buffer
+│   │   ├── builder.h         # Network construction, zone topology, tuning curves, sim driver
 │   │   ├── ml.h              # Ridge classifier, StandardScaler, stratified split, stats
-│   │   └── npz_reader.h      # NumPy .npz file reader (ZIP + zlib)
+│   │   ├── npz_reader.h      # NumPy .npz file reader (ZIP + zlib)
+│   │   └── experiments.h     # Shared constants, types, and helpers for all experiment modes
 │   └── src/
-│       ├── main.cpp           # Sweep driver
-│       ├── network.cpp        # Spiking network dynamics and connectivity
-│       ├── builder.cpp        # Ring-zone topology, weight overrides, STD, compaction
+│       ├── main.cpp           # CLI parsing and dispatch (~120 lines)
+│       ├── input_grid.cpp     # Input neuron grid search + MI refinement
+│       ├── classification.cpp # Adaptation sweep, trace, verify, classify, calibrate
+│       ├── network.cpp        # Spiking dynamics, conductance updates, stimulation
+│       ├── builder.cpp        # Ring-zone topology, Gaussian tuning, weight overrides, STD
 │       ├── ml.cpp             # ML pipeline and statistical tests
 │       └── npz_reader.cpp     # NPZ/NPY parsing
 ├── docker/
 │   └── Dockerfile             # Debian Trixie slim build environment
 ├── Makefile                   # C++17, -O3, LAPACK/BLAS, zlib, OpenMP
 ├── dev.sh                     # Docker dev container launcher
-└── data/                      # (not tracked) BSA spike train .npz files
-    ├── preprocessing_config_bsa.json
-    └── spike_trains_bsa/      # ~7 GB, 3000 .npz files
+├── network_snapshot.npz       # Deterministic Python-exported network topology
+├── experiments/               # Python analysis and figure generation scripts
+│   ├── gen_input_diagnostic.py    # 10-panel input neuron diagnostic generator
+│   ├── gen_3panel_diagnostic.py   # 3-panel BSA→conductance→spikes diagnostic
+│   ├── gen_top_configs.py         # Top grid search config comparison figure
+│   ├── plot_input_grid.py         # Grid search results visualization
+│   ├── plot_tuning_curves.py      # Gaussian tuning coverage overview figure
+│   └── plot_tuning_detail.py      # Single-neuron tuning detail figure
+├── data/                      # symlink → external BSA spike train data (see below)
+└── results/
+    ├── verification_python_to_cpp/    # Experiment 1
+    ├── gaussian_tuning_curves/        # Gaussian frequency tuning curve figures
+    ├── network_snapshot/              # Deterministic network topology
+    ├── neuron_diagnostics/            # Experiment 4
+    ├── input_grid_search/             # Experiments 2 & 3
+    └── classification_adaptation_sweep/ # Experiment 5
+```
+
+## Build and run
+
+```bash
+make                    # produces ./cls_sweep
+./dev.sh                # or: build in Docker container
+
+# Adaptation sweep (main experiment)
+./cls_sweep --arms all --n-workers 8
+
+# Input neuron grid search (outputs to results/input_grid_search/)
+./cls_sweep --input-grid --n-workers 8
+
+# MI refinement of top grid search configs
+./cls_sweep --mi-refine --mi-refine-top 50 --mi-refine-samples 20 --n-workers 8
+
+# Single neuron trace
+./cls_sweep --trace-neuron 493 --trace-file data/spike_trains_bsa/spike_train_0_george_0.npz \
+    --trace-output trace.csv --no-noise --no-input-nmda \
+    --stim-current 0.0158 --input-tau-e 1.93 --input-adapt-inc 0.005
+
+# Behavioral verification
+./cls_sweep --verify-only --verify-output verify_cpp.json --samples-per-digit 100
+```
+
+## Data dependency
+
+The `data/` directory is a symlink to the BSA-encoded audio spike train data produced by the Python preprocessing pipeline in `Spiking-Neural-Network-Experiments/phase_1_Networks_of_LIF_neurons/liquid_state_machine_expanded/data/`. It contains ~3000 `.npz` files (~7 GB) with 500 samples per digit (digits 0-9).
+
+Each `.npz` file has two arrays:
+- `spike_times_ms` — spike times in milliseconds
+- `freq_bin_indices` — mel-frequency bin indices (0-127), parallel to spike_times_ms
+
+Both the C++ binary and all experiment scripts resolve data through `data/` relative to the project root. To set up on a new machine:
+
+```bash
+ln -sf /path/to/liquid_state_machine_expanded/data ./data
 ```
 
 ## Dependencies
@@ -75,75 +160,4 @@ The system performs **5-class spoken digit classification** (digits 0-4) using r
 - LAPACK/BLAS (Accelerate on macOS, liblapack/libblas on Linux)
 - zlib
 - OpenMP (optional, for parallel simulation)
-
-## Build
-
-```bash
-make            # produces ./cls_sweep
-make clean      # remove binary and object files
-```
-
-On macOS, the Makefile auto-detects Accelerate and Homebrew's libomp. On Linux it links against liblapack, libblas, and libgomp.
-
-## Docker (recommended for Linux builds)
-
-```bash
-./dev.sh        # builds image and drops you into a dev container
-make -j$(nproc) # build inside the container
-```
-
-## Usage
-
-```bash
-./cls_sweep --arms all --n-workers 8
-./cls_sweep --arms original --n-workers 4 --output-dir results/test
-```
-
-### Options
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--arms` | Grid arms to run: `all`, `original`, `A`, `E` (comma-separated) | `all` |
-| `--n-workers` | Number of OpenMP threads (use ~half your cores) | `8` |
-| `--output-dir` | Output directory for results JSON | `results/classification_adaptation_sweep/` |
-| `--snapshot` | Path to Python-exported `.npz` network snapshot | `network_snapshot.npz` (auto-detected next to binary) |
-| `--no-snapshot` | Force building the network from RNG instead of loading a snapshot | _(off)_ |
-
-## Output
-
-Results are checkpointed after every grid point to `classification_adaptation_sweep_checkpoint.json`, so you can kill and resume safely. The final output is `classification_adaptation_sweep.json`.
-
-Each grid point records: classification accuracy (mean/std), gap vs BSA baseline (with p-value, Cohen's d, CI), firing rate, ISI CV, adaptation level, participation ratio, and per-bin accuracy.
-
-## Estimated time
-
-~5-10 min per grid point at 4 workers. 159 points total ≈ 15-25 hours depending on CPU.
-
-## Behavioral verification (Python vs C++)
-
-Because C++'s `std::mt19937_64` and NumPy's MT19937 produce different random sequences even with identical seeds, the network topology diverges when built from RNG. To verify behavioral equivalence, the Python-built network is exported as an `.npz` snapshot and loaded directly in C++, bypassing all C++-side network construction. Both implementations then apply identical LHS-021 parameter overrides at runtime.
-
-Runtime noise (voltage and current) still differs between implementations (different RNG libraries), so exact spike-by-spike match is impossible. The verification instead compares aggregate statistics across 500 audio samples (100 per digit, digits 0-4).
-
-### Results
-
-```
-Metric                         Python        C++
-------------------------------------------------------
-n_samples                         500        497
-n_reservoir                       604        604
-mean_firing_rate_hz             34.33      35.34
-classification_accuracy         88.0%      85.6%
-classification_std              0.019      0.020
-```
-
-On 155 filename-matched samples (processed by both implementations):
-
-| Metric | Pearson r | KS p-value |
-|--------|-----------|------------|
-| Per-sample spike count | 0.992 | 0.874 |
-| Per-sample firing rate | 0.992 | 0.465 |
-
-The 2.4pp classification gap is within statistical noise (< 1 sigma of the combined classifier variance). The near-perfect per-sample correlation (r = 0.992) confirms that the same audio through the same network produces nearly identical spike counts despite different runtime noise.
-
-![Behavioral Verification Scatter Plot](results/verification_python_to_cpp/image.png)
+- Python 3 with numpy, pandas, matplotlib, scipy (for experiment scripts)
