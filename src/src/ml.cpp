@@ -4,6 +4,7 @@
 #include <numeric>
 #include <map>
 #include <cstdio>
+#include <cblas.h>
 
 namespace cls {
 
