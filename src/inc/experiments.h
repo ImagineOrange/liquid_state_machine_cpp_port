@@ -19,6 +19,8 @@
 #include <fstream>
 #include <sstream>
 #include <chrono>
+#include <future>
+#include <thread>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
@@ -303,14 +305,29 @@ inline InputGridMetrics compute_input_metrics(
     return m;
 }
 
-// Load audio samples from data directory
+// Load a single npz file into an AudioSample (thread-safe, no shared state)
+inline AudioSample load_single_sample(const std::string& fpath) {
+    NpzFile npz = load_npz(fpath);
+    AudioSample s;
+    s.spike_times_ms = npz["spike_times_ms"].to_float64_vec();
+    s.freq_bin_indices = npz["freq_bin_indices"].to_int32_vec();
+    s.digit = (int)npz["digit"].as_scalar_int();
+    s.speaker = npz["speaker"].as_string();
+    s.filename = fs::path(fpath).stem().string();
+    return s;
+}
+
+// Load audio samples from data directory (parallel I/O + decompression)
 inline std::vector<AudioSample> load_audio_samples(
     const std::string& data_dir, const std::vector<int>& digits,
     int samples_per_digit, int random_seed)
 {
     rng_seed(random_seed + 100);
     std::string spike_dir = data_dir + "/spike_trains_bsa";
-    std::vector<AudioSample> samples;
+
+    // Phase 1: collect all file paths deterministically (same order as before)
+    struct LoadEntry { std::string path; int digit; };
+    std::vector<LoadEntry> all_files;
 
     for (int digit : digits) {
         std::vector<std::string> files;
@@ -332,27 +349,52 @@ inline std::vector<AudioSample> load_audio_samples(
             for (int i : indices) selected.push_back(files[i]);
         }
 
-        printf("  Digit %d: %d files found, loading %d...\n",
+        printf("  Digit %d: %d files found, selected %d\n",
                digit, (int)files.size(), (int)selected.size());
-        int loaded = 0;
-        for (const auto& fpath : selected) {
+        for (auto& f : selected)
+            all_files.push_back({f, digit});
+    }
+
+    // Phase 2: parallel load all files
+    int n_files = (int)all_files.size();
+    int n_threads = std::min((int)std::thread::hardware_concurrency(), n_files);
+    if (n_threads < 1) n_threads = 1;
+    printf("  Loading %d files with %d threads...\n", n_files, n_threads);
+
+    std::vector<AudioSample> results(n_files);
+    std::vector<bool> success(n_files, false);
+    std::atomic<int> next_idx{0};
+    std::atomic<int> done_count{0};
+
+    auto worker = [&]() {
+        while (true) {
+            int idx = next_idx.fetch_add(1);
+            if (idx >= n_files) break;
             try {
-                NpzFile npz = load_npz(fpath);
-                AudioSample s;
-                s.spike_times_ms = npz["spike_times_ms"].to_float64_vec();
-                s.freq_bin_indices = npz["freq_bin_indices"].to_int32_vec();
-                s.digit = (int)npz["digit"].as_scalar_int();
-                s.speaker = npz["speaker"].as_string();
-                fs::path p(fpath);
-                s.filename = p.stem().string();
-                samples.push_back(std::move(s));
-                loaded++;
-                if (loaded % 50 == 0)
-                    printf("    %d/%d\n", loaded, (int)selected.size());
+                results[idx] = load_single_sample(all_files[idx].path);
+                success[idx] = true;
             } catch (const std::exception& e) {
-                fprintf(stderr, "WARNING: Skipping %s: %s\n", fpath.c_str(), e.what());
+                fprintf(stderr, "WARNING: Skipping %s: %s\n",
+                        all_files[idx].path.c_str(), e.what());
             }
+            int d = done_count.fetch_add(1) + 1;
+            if (d % 200 == 0 || d == n_files)
+                printf("    %d/%d loaded\n", d, n_files);
         }
+    };
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < n_threads; t++)
+        threads.emplace_back(worker);
+    for (auto& t : threads)
+        t.join();
+
+    // Phase 3: collect successful loads in original order (preserves deterministic ordering)
+    std::vector<AudioSample> samples;
+    samples.reserve(n_files);
+    for (int i = 0; i < n_files; i++) {
+        if (success[i])
+            samples.push_back(std::move(results[i]));
     }
 
     printf("\n  Loaded %d audio samples:\n", (int)samples.size());

@@ -2,16 +2,22 @@
 #include <atomic>
 
 // ============================================================
-// UNIFIED GRID AXES
+// GRID AXES — log-spaced, full coverage
 // ============================================================
+// adapt_inc: 0.0 baseline + 19 log-spaced values from 0.005 to 1.0 (ratio ~1.34x)
+// adapt_tau: 15 log-spaced values from 30 to 5000 ms (ratio ~1.44x)
+// Full grid: 20 x 15 = 300 points, no holes.
 static const std::vector<double> UNIFIED_INC = {
-    0.0, 0.005, 0.01, 0.02, 0.03, 0.04, 0.05,
-    0.185714, 0.2, 0.321429, 0.457143, 0.592857,
-    0.63, 0.728571, 0.864286, 1.0,
+    0.0,
+    0.0050, 0.0067, 0.0090, 0.0121, 0.0162,
+    0.0218, 0.0292, 0.0392, 0.0527, 0.0707,
+    0.0949, 0.1274, 0.1710, 0.2295, 0.3081,
+    0.4135, 0.5550, 0.7450, 1.0000,
 };
 static const std::vector<double> UNIFIED_TAU = {
-    30.0, 54.7, 99.6, 181.0, 330.6, 500.0, 602.4,
-    1098.0, 2000.0, 3000.0, 3500.0, 4000.0, 5000.0,
+    30.0, 43.2, 62.3, 89.8, 129.4,
+    186.5, 268.7, 387.3, 558.1, 804.4,
+    1159.2, 1670.6, 2407.5, 3469.5, 5000.0,
 };
 
 // ============================================================
@@ -19,84 +25,21 @@ static const std::vector<double> UNIFIED_TAU = {
 // ============================================================
 struct GridPoint {
     double adapt_inc, adapt_tau;
-    std::string source, point_id;
+    std::string point_id;
     int inc_idx, tau_idx;
 };
 
-static std::pair<int,int> snap_to_unified(double inc, double tau) {
-    int i_idx = 0, t_idx = 0;
-    double best_i = 1e9, best_t = 1e9;
-    for (int i = 0; i < (int)UNIFIED_INC.size(); i++) {
-        double d = std::abs(UNIFIED_INC[i] - inc);
-        if (d < best_i) { best_i = d; i_idx = i; }
-    }
-    for (int i = 0; i < (int)UNIFIED_TAU.size(); i++) {
-        double d = std::abs(UNIFIED_TAU[i] - tau);
-        if (d < best_t) { best_t = d; t_idx = i; }
-    }
-    if (best_i > 0.005 || best_t > 5.0) return {-1, -1};
-    return {i_idx, t_idx};
-}
-
-static std::vector<GridPoint> build_grid_points(const std::string& arms) {
-    std::set<std::string> requested;
-    std::istringstream ss(arms);
-    std::string tok;
-    while (std::getline(ss, tok, ',')) {
-        tok.erase(0, tok.find_first_not_of(" "));
-        tok.erase(tok.find_last_not_of(" ") + 1);
-        requested.insert(tok);
-    }
-    bool all = requested.count("all") > 0;
-
+static std::vector<GridPoint> build_grid_points(const std::string& /*arms*/) {
     std::vector<GridPoint> points;
-    std::set<std::pair<int,int>> seen;
-
-    auto add = [&](double inc, double tau, const std::string& source) {
-        auto key = std::make_pair((int)std::round(inc * 10000), (int)std::round(tau));
-        if (seen.count(key)) return;
-        seen.insert(key);
-        auto [ii, ti] = snap_to_unified(inc, tau);
-        char buf[256];
-        snprintf(buf, sizeof(buf), "%s_inc%.6f_tau%.1f", source.c_str(), inc, tau);
-        points.push_back({inc, tau, source, buf, ii, ti});
-    };
-
-    if (all || requested.count("original")) {
-        for (int i = 0; i < 8; i++) {
-            double inc = 0.05 + (1.0 - 0.05) * i / 7.0;
-            for (int j = 0; j < 8; j++) {
-                double tau = 30.0 * std::pow(2000.0 / 30.0, j / 7.0);
-                add(inc, tau, "original");
-            }
+    points.reserve(UNIFIED_INC.size() * UNIFIED_TAU.size());
+    for (int ii = 0; ii < (int)UNIFIED_INC.size(); ii++) {
+        for (int ti = 0; ti < (int)UNIFIED_TAU.size(); ti++) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "inc%.4f_tau%.1f",
+                     UNIFIED_INC[ii], UNIFIED_TAU[ti]);
+            points.push_back({UNIFIED_INC[ii], UNIFIED_TAU[ti], buf, ii, ti});
         }
     }
-
-    if (all || requested.count("A")) {
-        double a_inc[] = {0.005, 0.01, 0.02, 0.03, 0.04, 0.05};
-        double a_tau[] = {500.0, 1098.0, 2000.0, 3000.0, 4000.0, 5000.0};
-        for (double inc : a_inc) for (double tau : a_tau) add(inc, tau, "A");
-    }
-
-    if (all || requested.count("E")) {
-        for (double tau : UNIFIED_TAU) add(0.0, tau, "E");
-        double e_combos[][2] = {
-            {0.005,30},{0.005,54.7},{0.005,99.6},{0.005,181},{0.005,330.6},
-            {0.01,30},{0.01,54.7},{0.01,99.6},{0.01,181},
-            {0.02,30},{0.02,54.7},{0.03,30},{0.03,54.7},{0.04,30},
-            {0.185714,3500},{0.185714,4000},{0.185714,5000},
-            {0.2,3500},{0.2,4000},{0.2,5000},
-            {0.321429,3000},{0.321429,3500},{0.321429,4000},{0.321429,5000},
-            {0.457143,3000},{0.457143,3500},{0.457143,4000},{0.457143,5000},
-            {0.592857,3000},{0.592857,3500},{0.592857,4000},{0.592857,5000},
-            {0.63,3000},{0.63,3500},{0.63,4000},{0.63,5000},
-            {0.728571,3000},{0.728571,3500},{0.728571,4000},{0.728571,5000},
-            {0.864286,3000},{0.864286,3500},{0.864286,4000},{0.864286,5000},
-            {1.0,3000},{1.0,3500},{1.0,4000},{1.0,5000},
-        };
-        for (auto& c : e_combos) add(c[0], c[1], "E");
-    }
-
     return points;
 }
 
@@ -216,14 +159,19 @@ struct AllSamplesResult {
     std::vector<double> adapt_stim_ends;
 };
 
-// Apply tonic background current to reservoir neurons only.
-// bg_current > 0 is depolarizing (increases rate), < 0 is hyperpolarizing.
-static void set_reservoir_background_current(SphericalNetwork& net,
-                                              const ZoneInfo& zone_info,
-                                              double bg_current) {
-    net.background_current.assign(net.n_neurons, 0.0);
-    for (int nid : zone_info.reservoir_zone_indices)
-        net.background_current[nid] = bg_current;
+// Apply tonic conductance to reservoir neurons only.
+// g_tonic > 0, reversal determines direction:
+//   E_i (-80 mV) = shunting inhibition (rate too high)
+//   E_e (0 mV)   = tonic excitation (rate too low)
+static void set_reservoir_tonic_conductance(SphericalNetwork& net,
+                                             const ZoneInfo& zone_info,
+                                             double g_tonic, double reversal) {
+    net.tonic_conductance.assign(net.n_neurons, 0.0);
+    net.tonic_reversal.assign(net.n_neurons, 0.0);
+    for (int nid : zone_info.reservoir_zone_indices) {
+        net.tonic_conductance[nid] = g_tonic;
+        net.tonic_reversal[nid] = reversal;
+    }
 }
 
 static AllSamplesResult run_all_samples(const NetworkConfig& cfg,
@@ -232,7 +180,8 @@ static AllSamplesResult run_all_samples(const NetworkConfig& cfg,
                                          const SimConfig& sim_cfg,
                                          int n_workers,
                                          bool verbose = true,
-                                         double bg_current = 0.0) {
+                                         double g_tonic = 0.0,
+                                         double tonic_rev = -80.0) {
     int n_samples = (int)samples.size();
     AllSamplesResult out;
     out.res_bins_list.resize(n_samples);
@@ -256,8 +205,8 @@ static AllSamplesResult run_all_samples(const NetworkConfig& cfg,
                               &dyn_ovr, "default", true);
         }
         StdMasks masks = build_std_masks(net, zone_info);
-        if (bg_current != 0.0)
-            set_reservoir_background_current(net, zone_info, bg_current);
+        if (g_tonic != 0.0)
+            set_reservoir_tonic_conductance(net, zone_info, g_tonic, tonic_rev);
 
         rng_seed(cfg.n_neurons + 42 + (uint64_t)omp_get_thread_num() * 1000 +
                  (uint64_t)getpid());
@@ -294,8 +243,8 @@ static double measure_rate(const NetworkConfig& cfg,
                            const std::vector<AudioSample>& samples_subset,
                            const DynamicalOverrides& dyn_ovr,
                            const SimConfig& sim_cfg, int n_workers,
-                           double bg_current = 0.0) {
-    auto res = run_all_samples(cfg, samples_subset, dyn_ovr, sim_cfg, n_workers, false, bg_current);
+                           double g_tonic = 0.0, double tonic_rev = -80.0) {
+    auto res = run_all_samples(cfg, samples_subset, dyn_ovr, sim_cfg, n_workers, false, g_tonic, tonic_rev);
     double trial_dur_s = (sim_cfg.audio_duration_ms + POST_STIM_MS) / 1000.0;
     double sum = 0;
     for (int i = 0; i < (int)samples_subset.size(); i++) {
@@ -307,54 +256,88 @@ static double measure_rate(const NetworkConfig& cfg,
 // ============================================================
 // CALIBRATION
 // ============================================================
-struct CalLogEntry { int iter; double stim_current; double rate_hz; };
+struct CalLogEntry { int iter; double g_tonic; double rate_hz; };
 
 // ============================================================
-// CALIBRATION — BACKGROUND CURRENT (reservoir-only tonic current)
+// CALIBRATION — TONIC CONDUCTANCE (reservoir-only)
 // ============================================================
-static constexpr double BG_CURRENT_LO = -0.5;   // hyperpolarizing floor
-static constexpr double BG_CURRENT_HI = 0.5;     // depolarizing ceiling
+// g_tonic >= 0. Reversal determines direction:
+//   E_i (-80 mV): shunting inhibition — suppresses rate
+//   E_e (0 mV):   tonic excitation — boosts rate
+// Calibration first measures natural rate at g=0 to pick the right reversal,
+// then binary-searches g upward from 0.
+static constexpr double G_TONIC_HI = 5.0;      // initial search ceiling
 
-static std::tuple<double, double, std::vector<CalLogEntry>>
-calibrate_background_current(NetworkConfig cfg,
-                              const DynamicalOverrides& dyn_ovr,
-                              const std::vector<AudioSample>& cal_samples,
-                              SimConfig sim_cfg, int n_workers,
-                              double target_rate,
-                              double initial_guess = 0.0) {
+struct CalResult {
+    double g_tonic;
+    double reversal;
+    double rate_hz;
     std::vector<CalLogEntry> log;
-    double lo = BG_CURRENT_LO, hi = BG_CURRENT_HI;
+};
+
+static CalResult
+calibrate_tonic_conductance(NetworkConfig cfg,
+                             const DynamicalOverrides& dyn_ovr,
+                             const std::vector<AudioSample>& cal_samples,
+                             SimConfig sim_cfg, int n_workers,
+                             double target_rate,
+                             double initial_guess = 0.0,
+                             double prev_reversal = -80.0) {
+    std::vector<CalLogEntry> log;
     int iteration = 0;
 
-    // Try initial guess first
-    {
-        double rate = measure_rate(cfg, cal_samples, dyn_ovr, sim_cfg, n_workers, initial_guess);
+    // Measure natural rate (g=0) to determine direction
+    double natural_rate = measure_rate(cfg, cal_samples, dyn_ovr, sim_cfg, n_workers, 0.0);
+    log.push_back({iteration, 0.0, natural_rate});
+    printf("    cal[%d] g=0 (natural) -> %.1f Hz (target=%.1f)\n",
+           iteration, natural_rate, target_rate);
+    iteration++;
+
+    if (std::abs(natural_rate - target_rate) <= RATE_TOLERANCE_HZ)
+        return {0.0, 0.0, natural_rate, log};
+
+    // Pick reversal: need to suppress if too fast, excite if too slow
+    double reversal = (natural_rate > target_rate) ? -80.0 : 0.0;
+    const char* mode = (reversal < -1.0) ? "inhibitory" : "excitatory";
+    printf("    cal: natural=%.1f Hz, target=%.1f Hz -> %s mode (E_rev=%.0f)\n",
+           natural_rate, target_rate, mode, reversal);
+
+    // For both modes: higher g = stronger effect = rate moves toward target
+    double lo = 0.0, hi = G_TONIC_HI;
+
+    // Try initial guess if nonzero and same direction
+    if (initial_guess > 0.0 && prev_reversal == reversal) {
+        double rate = measure_rate(cfg, cal_samples, dyn_ovr, sim_cfg, n_workers,
+                                    initial_guess, reversal);
         log.push_back({iteration, initial_guess, rate});
-        printf("    bg_cal[%d] bg=%.4f -> %.1f Hz (target=%.1f)\n",
-               iteration, initial_guess, rate, target_rate);
+        printf("    cal[%d] g=%.4f -> %.1f Hz\n", iteration, initial_guess, rate);
         iteration++;
         if (std::abs(rate - target_rate) <= RATE_TOLERANCE_HZ)
-            return {initial_guess, rate, log};
-        if (rate > target_rate) hi = initial_guess; else lo = initial_guess;
+            return {initial_guess, reversal, rate, log};
+
+        // Did we overshoot or undershoot?
+        bool overshot = (reversal < -1.0) ? (rate < target_rate) : (rate > target_rate);
+        if (overshot) hi = initial_guess; else lo = initial_guess;
     }
 
     for (;; iteration++) {
         double mid = (lo + hi) / 2.0;
-        double rate = measure_rate(cfg, cal_samples, dyn_ovr, sim_cfg, n_workers, mid);
+        double rate = measure_rate(cfg, cal_samples, dyn_ovr, sim_cfg, n_workers, mid, reversal);
         log.push_back({iteration, mid, rate});
-        printf("    bg_cal[%d] bg=%.4f -> %.1f Hz (target=%.1f)\n",
-               iteration, mid, rate, target_rate);
+        printf("    cal[%d] g=%.4f -> %.1f Hz\n", iteration, mid, rate);
 
         if (std::abs(rate - target_rate) <= RATE_TOLERANCE_HZ)
-            return {mid, rate, log};
+            return {mid, reversal, rate, log};
 
-        if (rate > target_rate) hi = mid; else lo = mid;
+        // For both modes: did we overshoot the target?
+        bool overshot = (reversal < -1.0) ? (rate < target_rate) : (rate > target_rate);
+        if (overshot) hi = mid; else lo = mid;
 
-        // If interval collapses, widen and continue
+        // If interval collapses, widen upward (more conductance)
         if (hi - lo < 1e-6) {
-            lo = std::min(lo, mid - 0.1);
-            hi = std::max(hi, mid + 0.1);
-            printf("    bg_cal: interval collapsed, widening to [%.4f, %.4f]\n", lo, hi);
+            double span = std::max(mid, 1.0);
+            hi = mid + span;
+            printf("    cal: interval collapsed, widening hi to %.4f\n", hi);
         }
     }
 }
@@ -891,7 +874,8 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
 
     printf("======================================================================\n");
     printf("  CLASSIFICATION ADAPTATION PARAMETER SWEEP (C++ PORT)\n");
-    printf("  Grid points: %d x 2 branches (A=unmatched, B=bg-current-matched)\n", n_grid);
+    printf("  Grid: %d x %d = %d points x 2 branches\n",
+           (int)UNIFIED_INC.size(), (int)UNIFIED_TAU.size(), n_grid);
     printf("  Task: 5-class digit classification (digits 0-4)\n");
     printf("  Samples: %d per digit = %d total\n", SAMPLES_PER_DIGIT, SAMPLES_PER_DIGIT * N_DIGITS);
     printf("  Workers: %d\n", n_workers);
@@ -1156,8 +1140,20 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
     sim_cfg.post_stimulus_ms = POST_STIM_MS;
     sim_cfg.stimulus_current = INPUT_STIM_CURRENT;
 
-    std::vector<AudioSample> cal_samples(samples.begin(),
-                                          samples.begin() + std::min(CALIBRATION_N_SAMPLES, n_samples));
+    // Stratified calibration subset: equal samples per digit to avoid
+    // digit-dependent rate bias (samples are ordered by digit in the full set).
+    std::vector<AudioSample> cal_samples;
+    {
+        int per_digit = std::max(1, CALIBRATION_N_SAMPLES / N_DIGITS);
+        std::map<int, int> digit_count;
+        for (auto& s : samples) {
+            if ((int)cal_samples.size() >= CALIBRATION_N_SAMPLES) break;
+            if (digit_count[s.digit] < per_digit) {
+                cal_samples.push_back(s);
+                digit_count[s.digit]++;
+            }
+        }
+    }
 
     double trial_dur_s = (sim_cfg.audio_duration_ms + POST_STIM_MS) / 1000.0;
 
@@ -1294,11 +1290,12 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
                                const DynamicalOverrides& dyn_ovr,
                                const SimConfig& eval_sim,
                                const std::string& branch,
-                               double cal_value,    // matched_stim (A) or bg_current (B)
-                               double cal_rate) -> std::string {
+                               double cal_value,    // 0 (A) or g_tonic (B)
+                               double cal_rate,
+                               double tonic_rev = -80.0) -> std::string {
         double t0 = now_seconds();
-        double bg = (branch == "B_matched") ? cal_value : 0.0;
-        auto res = run_all_samples(base_cfg, samples, dyn_ovr, eval_sim, n_workers, true, bg);
+        double gt = (branch == "B_matched") ? cal_value : 0.0;
+        auto res = run_all_samples(base_cfg, samples, dyn_ovr, eval_sim, n_workers, true, gt, tonic_rev);
         double sim_time = now_seconds() - t0;
 
         double rate_mean = 0, rate_std = 0;
@@ -1346,7 +1343,6 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
         oss << "{";
         oss << "\"branch\": \"" << branch << "\", ";
         oss << "\"point_id\": \"" << pt.point_id << "\", ";
-        oss << "\"source\": \"" << pt.source << "\", ";
         oss << "\"inc_idx\": " << pt.inc_idx << ", ";
         oss << "\"tau_idx\": " << pt.tau_idx << ", ";
         oss << std::fixed;
@@ -1354,7 +1350,8 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
         oss << "\"adapt_inc\": " << pt.adapt_inc << ", ";
         oss << "\"adapt_tau\": " << pt.adapt_tau << ", ";
         oss << "\"stimulus_current\": " << eval_sim.stimulus_current << ", ";
-        oss << "\"background_current\": " << bg << ", ";
+        oss << "\"tonic_conductance\": " << gt << ", ";
+        oss << "\"tonic_reversal\": " << tonic_rev << ", ";
         oss << "\"calibration_rate_hz\": " << cal_rate << ", ";
         oss << "\"classification_accuracy\": " << cls_res.accuracy << ", ";
         oss.precision(6);
@@ -1399,7 +1396,7 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
     std::vector<std::map<std::string, std::string>> grid_results_json;
     std::vector<double> grid_point_times;
     double sweep_start = now_seconds();
-    std::map<int, double> last_bg_by_tau;  // warm-start for Branch B calibration
+    std::map<int, std::pair<double,double>> last_cal_by_tau;  // warm-start: {g_tonic, reversal}
 
     for (int pt_num = 0; pt_num < n_grid; pt_num++) {
         auto& pt = grid_points[pt_num];
@@ -1445,24 +1442,27 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
             grid_results_json.push_back({{"json", json}});
         }
 
-        // --- Branch B: Background-current-matched ---
-        // stimulus_current fixed at INPUT_STIM_CURRENT, calibrate bg_current
+        // --- Branch B: Tonic-conductance-matched ---
+        // stimulus_current fixed at INPUT_STIM_CURRENT, calibrate g_tonic
         {
             SimConfig eval_b = sim_cfg;  // stim fixed
 
-            double prev_bg = 0.0;
-            if (pt.tau_idx >= 0 && last_bg_by_tau.count(pt.tau_idx))
-                prev_bg = last_bg_by_tau[pt.tau_idx];
+            double prev_gt = 0.0, prev_rev = -80.0;
+            if (pt.tau_idx >= 0 && last_cal_by_tau.count(pt.tau_idx)) {
+                prev_gt = last_cal_by_tau[pt.tau_idx].first;
+                prev_rev = last_cal_by_tau[pt.tau_idx].second;
+            }
 
-            auto [matched_bg, bg_cal_rate, bg_cal_log] =
-                calibrate_background_current(base_cfg, dyn_ovr, cal_samples, eval_b,
-                                              n_workers, target_rate_hz, prev_bg);
+            auto cal = calibrate_tonic_conductance(base_cfg, dyn_ovr, cal_samples, eval_b,
+                                                    n_workers, target_rate_hz, prev_gt, prev_rev);
 
-            if (pt.tau_idx >= 0) last_bg_by_tau[pt.tau_idx] = matched_bg;
-            printf("    [B] Calibrated: bg=%.4f -> %.1f Hz\n", matched_bg, bg_cal_rate);
+            if (pt.tau_idx >= 0) last_cal_by_tau[pt.tau_idx] = {cal.g_tonic, cal.reversal};
+            const char* mode = (cal.reversal < -1.0) ? "inh" : "exc";
+            printf("    [B] Calibrated: g_tonic=%.4f (%s) -> %.1f Hz\n",
+                   cal.g_tonic, mode, cal.rate_hz);
 
             auto json = evaluate_branch(pt, dyn_ovr, eval_b, "B_matched",
-                                         matched_bg, bg_cal_rate);
+                                         cal.g_tonic, cal.rate_hz, cal.reversal);
             grid_results_json.push_back({{"json", json}});
         }
 

@@ -28,25 +28,14 @@ RidgeResult ridge_classify(const Mat& X_train, const std::vector<int>& y_train,
                            const Mat& X_test, const std::vector<int>& y_test,
                            double alpha, const std::vector<int>& classes);
 
-// Pre-computed SVD for reuse across multiple alpha values
-struct SvdDecomp {
-    std::vector<double> S;
-    Mat U;
-    Mat Vt;
-};
-
-SvdDecomp svd_decompose(const Mat& X_train);
-
-RidgeResult ridge_classify_from_svd(const SvdDecomp& svd,
-                                     const Mat& X_train, const std::vector<int>& y_train,
-                                     const Mat& X_test, const std::vector<int>& y_test,
-                                     double alpha, const std::vector<int>& classes);
-
-// Pre-computed per-fold context: SVD + U^T*Y_bin, for fast multi-alpha sweeps
+// Pre-computed per-fold context: dual form (K = X*X^T) for fast multi-alpha sweeps.
+// When n << p (typical for reservoir readout), solving the n×n dual system is
+// dramatically faster than the p×p SVD (~16x for 1200×36240 matrices).
 struct RidgeFoldContext {
-    SvdDecomp svd;
-    Mat UtY;         // (k x n_classes) = U^T * Y_bin
-    int p;           // number of features
+    Mat K;            // (n_train x n_train) = X_train * X_train^T (Gram matrix)
+    Mat K_test;       // (n_test x n_train) = X_test * X_train^T
+    Mat Y_bin;        // (n_train x n_classes) one-hot targets
+    int n_train;
     int n_test;
     std::vector<int> classes;
 };

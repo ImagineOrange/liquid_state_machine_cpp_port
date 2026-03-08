@@ -326,18 +326,15 @@ void SphericalNetwork::init_ring_buffer(double dt) {
     }
 
     ring_size = (max_delay > 0) ? (int)std::ceil(max_delay / dt) + 2 : 2;
-    ring_targets.resize(ring_size);
-    ring_weights.resize(ring_size);
-    ring_slow_inh.resize(ring_size);
+    ring_buffer.resize(ring_size);
+    // Pre-reserve: estimate ~1000 deliveries per slot (avoids realloc during sim)
+    for (auto& slot : ring_buffer) slot.reserve(2048);
     ring_initialized = true;
 }
 
 void SphericalNetwork::clear_ring_buffer() {
-    for (int i = 0; i < ring_size; i++) {
-        ring_targets[i].clear();
-        ring_weights[i].clear();
-        ring_slow_inh[i].clear();
-    }
+    for (int i = 0; i < ring_size; i++)
+        ring_buffer[i].clear();
 }
 
 std::vector<int> SphericalNetwork::update_network(double dt) {
@@ -348,26 +345,27 @@ std::vector<int> SphericalNetwork::update_network(double dt) {
     int slot = current_step % ring_size;
 
     // 1. Deliver due spikes from ring buffer
-    if (!ring_targets[slot].empty()) {
-        int n_deliver = (int)ring_targets[slot].size();
+    auto& ring_slot = ring_buffer[slot];
+    if (!ring_slot.empty()) {
+        const int n_deliver = (int)ring_slot.size();
+        const RingEntry* __restrict__ entries = ring_slot.data();
         for (int k = 0; k < n_deliver; k++) {
-            int tgt = ring_targets[slot][k];
-            double w = ring_weights[slot][k];
-            bool slow = ring_slow_inh[slot][k];
-            if (w > 0) {
-                g_e[tgt] += w;
-                g_nmda[tgt] += w * nmda_ratio;
-            } else {
-                if (slow) {
-                    g_i_slow[tgt] += -w;
-                } else {
-                    g_i[tgt] += -w;
-                }
+            const int tgt = entries[k].target;
+            const double w = entries[k].weight;
+            switch (entries[k].kind) {
+                case 0: // excitatory
+                    g_e[tgt] += w;
+                    g_nmda[tgt] += w * nmda_ratio;
+                    break;
+                case 1: // fast inhibitory
+                    g_i[tgt] += w;
+                    break;
+                case 2: // slow inhibitory
+                    g_i_slow[tgt] += w;
+                    break;
             }
         }
-        ring_targets[slot].clear();
-        ring_weights[slot].clear();
-        ring_slow_inh[slot].clear();
+        ring_slot.clear();
     }
 
     // Ensure persistent refractory buffer is sized
@@ -398,8 +396,9 @@ std::vector<int> SphericalNetwork::update_network(double dt) {
     const double* __restrict__ pdecnmda = exp_decay_nmda.data();
     const double* __restrict__ pdecadapt = exp_decay_adapt.data();
     double* __restrict__ ptss = t_since_spike.data();
-    const bool has_bg = !background_current.empty();
-    const double* __restrict__ pbg = has_bg ? background_current.data() : nullptr;
+    const bool has_tonic = !tonic_conductance.empty();
+    const double* __restrict__ ptonic = has_tonic ? tonic_conductance.data() : nullptr;
+    const double* __restrict__ ptonic_rev = has_tonic ? tonic_reversal.data() : nullptr;
 
     // 2-6: Fused loop — refractory, membrane dynamics, conductance decay,
     //       synaptic noise, spike detection — single pass over neurons.
@@ -421,8 +420,8 @@ std::vector<int> SphericalNetwork::update_network(double dt) {
         double i_nmda = pgnmda[i] * mg_block * (perev[i] - vi);
         double i_adapt = padapt[i] * (pkrev[i] - vi);
 
-        double i_bg = has_bg ? pbg[i] : 0.0;
-        double dv = dt * ((-(vi - pvrest[i]) / ptaum[i]) + i_e + i_nmda + i_i + i_is + i_adapt + i_bg);
+        double i_tonic = has_tonic ? ptonic[i] * (ptonic_rev[i] - vi) : 0.0;
+        double dv = dt * ((-(vi - pvrest[i]) / ptaum[i]) + i_e + i_nmda + i_i + i_is + i_adapt + i_tonic);
         vi += dv;
         double vn = rng_normal() * pvnoise[i];
         vi += vn;
@@ -492,9 +491,16 @@ std::vector<int> SphericalNetwork::update_network(double dt) {
             for (int64_t c = start; c < end; c++) {
                 int delivery_step = current_step + (int)csr_delay_steps[c];
                 int rs = delivery_step % ring_size;
-                ring_targets[rs].push_back(csr_targets[c]);
-                ring_weights[rs].push_back(csr_weights[c]);
-                ring_slow_inh[rs].push_back(csr_slow_inh[c]);
+                double w = csr_weights[c];
+                uint8_t kind;
+                double abs_w;
+                if (w > 0) {
+                    kind = 0; abs_w = w;
+                } else {
+                    abs_w = -w;
+                    kind = csr_slow_inh[c] ? 2 : 1;
+                }
+                ring_buffer[rs].push_back({csr_targets[c], abs_w, kind});
             }
         }
     }

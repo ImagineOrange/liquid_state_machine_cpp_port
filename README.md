@@ -130,21 +130,31 @@ Detailed state-variable traces (V, g_e, g_i, g_nmda, adaptation, all currents) f
 
 ### 5. Classification adaptation sweep (main experiment)
 
-The core scientific question: does spike-frequency adaptation improve reservoir computation? This 159-point sweep over `(adaptation_increment, adaptation_tau)` measures 5-class spoken digit classification accuracy, with each grid point rate-matched to a baseline firing rate via binary search over stimulus current to isolate the effect of adaptation dynamics.
+The core scientific question: does spike-frequency adaptation improve reservoir computation? This 300-point sweep over `(adaptation_increment × adaptation_tau)` — 20 inc × 15 tau — measures 5-class spoken digit classification accuracy. Two branches are run: unmatched (natural rate) and tonic-conductance-matched (rate-controlled at 20 Hz), isolating adaptation dynamics from firing rate confounds.
 
-**Readout:** SVD-based ridge regression (one-vs-rest), 20ms time bins flattened, 5-fold stratified CV x 5 repeats.
+**Readout:** Dual-form ridge regression (one-vs-rest), 20ms time bins × ~604 reservoir neurons = 36,240 features flattened per sample, 5-fold stratified CV × 5 repeats, best alpha from {0.01, 0.1, 1, 10, 100, 1000}.
+
+**Dual-form ridge:** When n << p (typical for reservoir readout: 1200 train samples × 36,240 features), solving the n×n dual system K = XX^T via Cholesky decomposition (`dposv_`) is ~16.7× faster than the p×p SVD, with identical predictions. The Gram matrix K and test projection K_test are precomputed once per fold; each alpha only requires a Cholesky solve and matrix multiply. See `src/src/ml.cpp` for implementation.
 
 **Files:** `results/classification_adaptation_sweep/`
+
+### 6. Readout method benchmark
+
+Comprehensive comparison of 30+ readout methods on BSA-encoded spike train data to validate the choice of ridge regression for LSM readout. Tests linear methods (Ridge variants, Logistic Regression, Linear SVM, LDA), nonlinear methods (Extra Trees, Random Forest, KNN, HistGBM), and dimensionality reduction pipelines (Truncated SVD + Ridge, PCA + Ridge, coarser time bins).
+
+**Key findings:** Nonlinear methods achieve higher accuracy (Extra Trees 97.1%, KNN k=1 96.5%) but linear readout is the scientifically correct choice for LSM papers — the reservoir should do the nonlinear transformation. Among linear methods, dual-form ridge is optimal: identical accuracy to SVD-based ridge at 3.8–16.7× speedup depending on feature dimensionality.
+
+**Files:** `experiments/readout_benchmark.py`
 
 ## Project structure
 
 ```
 ├── src/
 │   ├── inc/
-│   │   ├── common.h          # RNG, matrix ops, SVD, JSON helpers
+│   │   ├── common.h          # RNG, matrix ops, LAPACK (SVD, Cholesky), JSON helpers
 │   │   ├── network.h         # SphericalNetwork: LIF dynamics, CSR connectivity, ring buffer
 │   │   ├── builder.h         # Network construction, zone topology, tuning curves, sim driver
-│   │   ├── ml.h              # Ridge classifier, StandardScaler, stratified split, stats
+│   │   ├── ml.h              # Dual-form ridge classifier, StandardScaler, stratified CV, stats
 │   │   ├── npz_reader.h      # NumPy .npz file reader (ZIP + zlib)
 │   │   └── experiments.h     # Shared constants, types, and helpers for all experiment modes
 │   └── src/
@@ -153,7 +163,7 @@ The core scientific question: does spike-frequency adaptation improve reservoir 
 │       ├── classification.cpp # Adaptation sweep, trace, verify, classify, calibrate
 │       ├── network.cpp        # Spiking dynamics, conductance updates, stimulation
 │       ├── builder.cpp        # Ring-zone topology, Gaussian tuning, weight overrides, STD
-│       ├── ml.cpp             # ML pipeline and statistical tests
+│       ├── ml.cpp             # Dual-form ridge (Cholesky), ML pipeline, statistical tests
 │       └── npz_reader.cpp     # NPZ/NPY parsing
 ├── docker/
 │   └── Dockerfile             # Debian Trixie slim build environment
@@ -166,7 +176,9 @@ The core scientific question: does spike-frequency adaptation improve reservoir 
 │   ├── gen_top_configs.py         # Top grid search config comparison figure
 │   ├── plot_input_grid.py         # Grid search results visualization
 │   ├── plot_tuning_curves.py      # Gaussian tuning coverage overview figure
-│   └── plot_tuning_detail.py      # Single-neuron tuning detail figure
+│   ├── plot_tuning_detail.py      # Single-neuron tuning detail figure
+│   ├── plot_adaptation_heatmap.py # Publication-quality adaptation sweep heatmap
+│   └── readout_benchmark.py       # 30+ readout method comparison on BSA data
 ├── data/                      # symlink → external BSA spike train data (see below)
 └── results/
     ├── verification_python_to_cpp/    # Experiment 1

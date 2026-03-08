@@ -64,10 +64,11 @@ public:
     // Dynamic state
     std::vector<double> v, g_e, g_i, g_i_slow, g_nmda, adaptation, t_since_spike;
 
-    // Tonic background current (nA) — applied per-neuron each timestep.
-    // Used for rate-matching without modulating input encoding.
-    // Positive = depolarizing (increases rate), negative = hyperpolarizing.
-    std::vector<double> background_current;
+    // Tonic conductance for rate-matching: g_tonic * (E_tonic - V) per neuron.
+    // Reversal determines direction: E_i (-80 mV) for inhibition, E_e (0 mV) for excitation.
+    // Biophysically: GABAergic tone (inhibitory) or thalamic/cholinergic drive (excitatory).
+    std::vector<double> tonic_conductance;
+    std::vector<double> tonic_reversal;
 
     // Decay factors
     std::vector<double> exp_decay_e, exp_decay_i, exp_decay_i_slow;
@@ -90,12 +91,15 @@ public:
     std::vector<bool> csr_slow_inh;
     std::vector<int64_t> csr_lengths;
 
-    // Ring buffer
+    // Ring buffer — packed struct for cache locality
+    struct RingEntry {
+        int32_t target;
+        double weight;
+        uint8_t kind;       // 0=excitatory, 1=fast_inh, 2=slow_inh
+    };
     bool ring_initialized = false;
     int ring_size = 0;
-    std::vector<std::vector<int32_t>> ring_targets;
-    std::vector<std::vector<double>> ring_weights;
-    std::vector<std::vector<bool>> ring_slow_inh;
+    std::vector<std::vector<RingEntry>> ring_buffer;
 
     // Skip NMDA on stimulate_neuron/stimulate_neurons calls (experiment flag)
     bool skip_stim_nmda = false;

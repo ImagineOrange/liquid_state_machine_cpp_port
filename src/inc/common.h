@@ -39,54 +39,117 @@ extern "C" {
                  const int* lda, double* s, double* u, const int* ldu,
                  double* vt, const int* ldvt, double* work, const int* lwork,
                  int* iwork, int* info);
+    void dposv_(const char* uplo, const int* n, const int* nrhs, double* a,
+                const int* lda, double* b, const int* ldb, int* info);
 }
 #endif
 
 namespace cls {
 
-// Thread-local RNG
+// ============================================================
+// Fast thread-local RNG: xoshiro256+ with cached Box-Muller
+// ============================================================
+struct FastRng {
+    uint64_t s[4];
+    double normal_spare;
+    bool has_spare;
+
+    void seed(uint64_t seed) {
+        // SplitMix64 to initialize state from a single seed
+        has_spare = false;
+        for (int i = 0; i < 4; i++) {
+            seed += 0x9e3779b97f4a7c15ULL;
+            uint64_t z = seed;
+            z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+            z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+            s[i] = z ^ (z >> 31);
+        }
+    }
+
+    inline uint64_t next() {
+        const uint64_t result = s[0] + s[3];
+        const uint64_t t = s[1] << 17;
+        s[2] ^= s[0];
+        s[3] ^= s[1];
+        s[1] ^= s[2];
+        s[0] ^= s[3];
+        s[2] ^= t;
+        s[3] = (s[3] << 45) | (s[3] >> 19); // rotl
+        return result;
+    }
+
+    inline double uniform() {
+        return (next() >> 11) * 0x1.0p-53; // [0, 1)
+    }
+
+    inline double uniform(double lo, double hi) {
+        return lo + uniform() * (hi - lo);
+    }
+
+    inline double normal() {
+        if (has_spare) {
+            has_spare = false;
+            return normal_spare;
+        }
+        // Box-Muller: generates two normals, caches one
+        double u, v, s_val;
+        do {
+            u = 2.0 * uniform() - 1.0;
+            v = 2.0 * uniform() - 1.0;
+            s_val = u * u + v * v;
+        } while (s_val >= 1.0 || s_val == 0.0);
+        double mul = std::sqrt(-2.0 * std::log(s_val) / s_val);
+        normal_spare = v * mul;
+        has_spare = true;
+        return u * mul;
+    }
+
+    inline double normal(double mean, double stddev) {
+        return mean + stddev * normal();
+    }
+
+    inline double lognormal(double mu_log, double sigma_log) {
+        return std::exp(normal(mu_log, sigma_log));
+    }
+};
+
+inline thread_local FastRng g_fast_rng;
+
+// Also keep std::mt19937_64 for non-hot-path use (rng_choice, etc.)
 inline thread_local std::mt19937_64 g_rng;
 
-inline void rng_seed(uint64_t seed) { g_rng.seed(seed); }
-
-inline double rng_uniform() {
-    std::uniform_real_distribution<double> dist(0.0, 1.0);
-    return dist(g_rng);
+inline void rng_seed(uint64_t seed) {
+    g_rng.seed(seed);
+    g_fast_rng.seed(seed);
 }
 
-inline double rng_uniform(double lo, double hi) {
-    std::uniform_real_distribution<double> dist(lo, hi);
-    return dist(g_rng);
-}
-
+// Hot-path functions use FastRng
+inline double rng_uniform() { return g_fast_rng.uniform(); }
+inline double rng_uniform(double lo, double hi) { return g_fast_rng.uniform(lo, hi); }
 inline double rng_normal(double mean = 0.0, double stddev = 1.0) {
-    std::normal_distribution<double> dist(mean, stddev);
-    return dist(g_rng);
+    return (mean == 0.0 && stddev == 1.0) ? g_fast_rng.normal() : g_fast_rng.normal(mean, stddev);
 }
 
 inline std::vector<double> rng_normal_vec(int n, double mean = 0.0, double stddev = 1.0) {
-    std::normal_distribution<double> dist(mean, stddev);
     std::vector<double> out(n);
-    for (int i = 0; i < n; i++) out[i] = dist(g_rng);
+    for (int i = 0; i < n; i++) out[i] = g_fast_rng.normal(mean, stddev);
     return out;
 }
 
 inline double rng_lognormal(double mu_log, double sigma_log) {
-    std::lognormal_distribution<double> dist(mu_log, sigma_log);
-    return dist(g_rng);
+    return g_fast_rng.lognormal(mu_log, sigma_log);
 }
 
 inline std::vector<int> rng_choice(int n, int k, bool replace = false) {
     std::vector<int> result;
     if (replace) {
-        std::uniform_int_distribution<int> dist(0, n - 1);
-        for (int i = 0; i < k; i++) result.push_back(dist(g_rng));
+        for (int i = 0; i < k; i++)
+            result.push_back((int)(g_fast_rng.uniform() * n));
     } else {
         std::vector<int> pool(n);
         std::iota(pool.begin(), pool.end(), 0);
         for (int i = 0; i < k; i++) {
-            std::uniform_int_distribution<int> dist(i, n - 1);
-            int j = dist(g_rng);
+            int j = i + (int)(g_fast_rng.uniform() * (n - i));
             std::swap(pool[i], pool[j]);
         }
         result.assign(pool.begin(), pool.begin() + k);
