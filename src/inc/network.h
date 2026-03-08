@@ -122,6 +122,7 @@ public:
 
     // Persistent scratch buffers (avoid per-step allocation)
     std::vector<bool> _refractory;
+    std::vector<double> _noise_buf;  // pre-buffered normals (3*n_neurons)
 
     // Connection stats
     int attempted_connections = 0;

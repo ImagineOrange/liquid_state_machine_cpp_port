@@ -5,6 +5,11 @@ CXXFLAGS = -std=c++17 -O3 -Wall -Wextra -Wno-unused-parameter \
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
     LDFLAGS += -framework Accelerate
+    # vecLib headers (cblas.h, lapack.h) under Accelerate
+    VECLIB_PATH := $(shell xcrun --show-sdk-path 2>/dev/null)/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Headers
+    ifneq ($(wildcard $(VECLIB_PATH)),)
+        CXXFLAGS += -I$(VECLIB_PATH)
+    endif
     LIBOMP_PREFIX := $(shell brew --prefix libomp 2>/dev/null)
     ifneq ($(LIBOMP_PREFIX),)
         CXXFLAGS += -Xpreprocessor -fopenmp -I$(LIBOMP_PREFIX)/include
