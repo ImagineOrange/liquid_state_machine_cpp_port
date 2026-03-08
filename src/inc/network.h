@@ -64,6 +64,11 @@ public:
     // Dynamic state
     std::vector<double> v, g_e, g_i, g_i_slow, g_nmda, adaptation, t_since_spike;
 
+    // Tonic background current (nA) — applied per-neuron each timestep.
+    // Used for rate-matching without modulating input encoding.
+    // Positive = depolarizing (increases rate), negative = hyperpolarizing.
+    std::vector<double> background_current;
+
     // Decay factors
     std::vector<double> exp_decay_e, exp_decay_i, exp_decay_i_slow;
     std::vector<double> exp_decay_adapt, exp_decay_nmda;
@@ -106,9 +111,13 @@ public:
     std::vector<TraceRow> trace;
 
     // Activity tracking
-    std::vector<int> network_activity;
+    int step_counter = 0;
+    std::vector<int> network_activity;  // kept for callers that read it; not grown in hot path
     int current_avalanche_size = 0;
     int current_avalanche_start = -1;
+
+    // Persistent scratch buffers (avoid per-step allocation)
+    std::vector<bool> _refractory;
 
     // Connection stats
     int attempted_connections = 0;

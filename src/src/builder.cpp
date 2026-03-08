@@ -129,30 +129,50 @@ void create_ring_zone_network(SphericalNetwork& net, ZoneInfo& zone_info,
     // Overlapping spectral mapping
     int n_arc = (int)sorted_arc.size();
     std::map<int, std::vector<int>> input_mapping;
+    std::map<int, std::vector<double>> input_weights;
     std::set<int> all_input_set;
 
     if (n_arc > 0) {
-        double phi_min = sorted_arc_phis[0];
-        double phi_max = sorted_arc_phis[n_arc - 1];
+        // Place channel centers at quantiles of the neuron phi distribution.
+        // This compresses the frequency band onto the populated arc,
+        // eliminating coverage gaps from irregular neuron spacing.
         std::vector<double> channel_centers(n_mel);
         for (int m = 0; m < n_mel; m++) {
-            channel_centers[m] = phi_min + (phi_max - phi_min) * m / (n_mel - 1);
+            double frac = (double)m / std::max(1, n_mel - 1);
+            double idx = frac * (n_arc - 1);
+            int lo = (int)idx;
+            int hi = std::min(lo + 1, n_arc - 1);
+            double t = idx - lo;
+            channel_centers[m] = sorted_arc_phis[lo] * (1.0 - t)
+                               + sorted_arc_phis[hi] * t;
         }
 
-        int k = std::min(OVERLAP_K, n_arc);
-        for (int mel_bin = 0; mel_bin < n_mel; mel_bin++) {
-            std::vector<std::pair<double, int>> dists(n_arc);
-            for (int a = 0; a < n_arc; a++) {
-                dists[a] = {std::abs(sorted_arc_phis[a] - channel_centers[mel_bin]), a};
+        int k = std::min(OVERLAP_K, n_mel);  // K bins per neuron
+        // Sigma based on mean neuron spacing (not channel spacing)
+        double avg_spacing = (n_arc > 1)
+            ? (sorted_arc_phis[n_arc - 1] - sorted_arc_phis[0]) / (n_arc - 1)
+            : 1.0;
+        double sigma_phi = TUNING_SIGMA_CHANNELS * avg_spacing;
+        double inv_2sigma2 = 1.0 / (2.0 * sigma_phi * sigma_phi);
+
+        // Build neuron → K nearest bins, then invert to bin → neurons for injection
+        for (int a = 0; a < n_arc; a++) {
+            int nid = sorted_arc[a];
+            double neuron_phi = sorted_arc_phis[a];
+            // Find K nearest channel centers
+            std::vector<std::pair<double, int>> dists(n_mel);
+            for (int m = 0; m < n_mel; m++) {
+                dists[m] = {std::abs(channel_centers[m] - neuron_phi), m};
             }
             std::partial_sort(dists.begin(), dists.begin() + k, dists.end());
-            std::vector<int> mapped;
+            all_input_set.insert(nid);
             for (int kk = 0; kk < k; kk++) {
-                int nid = sorted_arc[dists[kk].second];
-                mapped.push_back(nid);
-                all_input_set.insert(nid);
+                int mel_bin = dists[kk].second;
+                double d = dists[kk].first;
+                double w = std::exp(-d * d * inv_2sigma2);
+                input_mapping[mel_bin].push_back(nid);
+                input_weights[mel_bin].push_back(w);
             }
-            input_mapping[mel_bin] = mapped;
         }
     }
 
@@ -166,6 +186,7 @@ void create_ring_zone_network(SphericalNetwork& net, ZoneInfo& zone_info,
     zone_info.input_zone_indices = surface_indices;
     zone_info.reservoir_zone_indices = reservoir_indices;
     zone_info.input_neuron_mapping = input_mapping;
+    zone_info.input_neuron_weights = input_weights;
     zone_info.input_neuron_indices = input_neuron_indices;
     zone_info.y_threshold = r_threshold;
     zone_info.sphere_radius = radius;
@@ -206,6 +227,15 @@ void create_ring_zone_network(SphericalNetwork& net, ZoneInfo& zone_info,
     }
 }
 
+void apply_input_neuron_regime(SphericalNetwork& net, const ZoneInfo& zone_info, double dt) {
+    for (int nid : zone_info.input_neuron_indices) {
+        net.tau_e[nid] = INPUT_TAU_E;
+        net.adaptation_increment[nid] = INPUT_ADAPT_INC;
+    }
+    net.skip_stim_nmda = true;
+    net.precompute_decay_factors(dt);
+}
+
 void apply_config_b_overrides(SphericalNetwork& net, ZoneInfo& zone_info, double dt) {
     int n = net.n_neurons;
     // Scale input->reservoir weights
@@ -242,6 +272,7 @@ void apply_config_b_overrides(SphericalNetwork& net, ZoneInfo& zone_info, double
 
     net.build_csr();
     net.precompute_decay_factors(dt);
+    apply_input_neuron_regime(net, zone_info, dt);
 }
 
 void apply_dynamical_overrides(SphericalNetwork& net, ZoneInfo& zone_info,
@@ -319,6 +350,7 @@ void apply_dynamical_overrides(SphericalNetwork& net, ZoneInfo& zone_info,
 
     net.build_csr();
     net.precompute_decay_factors(dt);
+    apply_input_neuron_regime(net, zone_info, dt);
 }
 
 void compact_network(SphericalNetwork& net, ZoneInfo& zone_info,
@@ -419,15 +451,25 @@ void compact_network(SphericalNetwork& net, ZoneInfo& zone_info,
     zone_info.input_neuron_indices = remap(zone_info.input_neuron_indices);
 
     std::map<int, std::vector<int>> new_mapping;
+    std::map<int, std::vector<double>> new_tuning_weights;
     for (auto& [mel, old_ids] : zone_info.input_neuron_mapping) {
         std::vector<int> new_ids;
-        for (int nid : old_ids) {
-            auto it = old_to_new.find(nid);
-            if (it != old_to_new.end()) new_ids.push_back(it->second);
+        std::vector<double> new_tw;
+        auto wit = zone_info.input_neuron_weights.find(mel);
+        for (size_t j = 0; j < old_ids.size(); j++) {
+            auto it = old_to_new.find(old_ids[j]);
+            if (it != old_to_new.end()) {
+                new_ids.push_back(it->second);
+                double w = (wit != zone_info.input_neuron_weights.end()
+                            && j < wit->second.size()) ? wit->second[j] : 1.0;
+                new_tw.push_back(w);
+            }
         }
         new_mapping[mel] = new_ids;
+        new_tuning_weights[mel] = new_tw;
     }
     zone_info.input_neuron_mapping = std::move(new_mapping);
+    zone_info.input_neuron_weights = std::move(new_tuning_weights);
 
     if (!quiet) {
         int n_ff = 0, n_nz = 0;
@@ -527,21 +569,30 @@ RunResult run_sample_with_std(SphericalNetwork& net, const AudioSample& sample,
     for (int step = 0; step < n_steps; step++) {
         double t_ms = step * dt;
 
-        // Inject BSA input
+        // Inject BSA input with Gaussian tuning weights
         auto it = step_to_spikes.find(step);
         if (it != step_to_spikes.end()) {
             std::vector<int> neuron_indices;
+            std::vector<double> tuning_weights;
             for (int si : it->second) {
                 int fb = sample.freq_bin_indices[si];
                 auto mit = zone_info.input_neuron_mapping.find(fb);
                 if (mit != zone_info.input_neuron_mapping.end()) {
-                    for (int nid : mit->second) neuron_indices.push_back(nid);
+                    auto wit = zone_info.input_neuron_weights.find(fb);
+                    const auto& neurons = mit->second;
+                    for (size_t j = 0; j < neurons.size(); j++) {
+                        neuron_indices.push_back(neurons[j]);
+                        double tw = (wit != zone_info.input_neuron_weights.end()
+                                     && j < wit->second.size())
+                                    ? wit->second[j] : 1.0;
+                        tuning_weights.push_back(tw);
+                    }
                 }
             }
             if (!neuron_indices.empty()) {
                 std::vector<double> currents(neuron_indices.size());
                 for (size_t k = 0; k < neuron_indices.size(); k++) {
-                    double eff = stim_current;
+                    double eff = stim_current * tuning_weights[k];
                     if (use_input_std) {
                         int nid = neuron_indices[k];
                         double dt_since = t_ms - input_last_time[nid];
@@ -727,6 +778,7 @@ void load_network_snapshot(SphericalNetwork& net, ZoneInfo& zone_info,
     net.t_since_spike.resize(n);
     for (int i = 0; i < n; i++) net.t_since_spike[i] = net.tau_ref[i] + 1e-5;
 
+    net.step_counter = 0;
     net.network_activity.clear();
     net.current_avalanche_size = 0;
     net.current_avalanche_start = -1;
@@ -776,20 +828,66 @@ void load_network_snapshot(SphericalNetwork& net, ZoneInfo& zone_info,
     zone_info.sphere_radius = net.sphere_radius;
     zone_info.connectivity_regime = "default";
 
-    // Input neuron mapping (n_mel x k matrix, -1 = unused)
+    // Input neuron mapping: rebuild from snapshot using neuron → K nearest bins
+    // The snapshot stores the old bin→neuron mapping; we use neuron positions
+    // to rebuild with uniform per-neuron coverage and Gaussian weights.
     {
         const auto& arr = npz["input_neuron_mapping"];
         int n_mel = (int)arr.shape[0];
-        int k = (int)arr.shape[1];
-        auto flat = arr.to_int32_vec();
+
+        // Get all input neurons and their phi angles
         zone_info.input_neuron_mapping.clear();
-        for (int mel = 0; mel < n_mel; mel++) {
-            std::vector<int> mapped;
-            for (int j = 0; j < k; j++) {
-                int nid = flat[mel * k + j];
-                if (nid >= 0) mapped.push_back(nid);
+        zone_info.input_neuron_weights.clear();
+
+        if (n_mel > 0 && !zone_info.input_neuron_indices.empty()) {
+            std::vector<double> neuron_phis;
+            for (int nid : zone_info.input_neuron_indices) {
+                auto& p = net.positions[nid];
+                neuron_phis.push_back(std::atan2(p[0], p[2]));
             }
-            zone_info.input_neuron_mapping[mel] = mapped;
+
+            // Place channel centers at quantiles of the neuron phi distribution
+            // (compresses spectrum onto populated arc, no coverage gaps)
+            std::vector<double> sorted_phis = neuron_phis;
+            std::sort(sorted_phis.begin(), sorted_phis.end());
+            int n_sorted = (int)sorted_phis.size();
+
+            std::vector<double> channel_centers(n_mel);
+            for (int m = 0; m < n_mel; m++) {
+                double frac = (double)m / std::max(1, n_mel - 1);
+                double idx = frac * (n_sorted - 1);
+                int lo = (int)idx;
+                int hi = std::min(lo + 1, n_sorted - 1);
+                double t = idx - lo;
+                channel_centers[m] = sorted_phis[lo] * (1.0 - t)
+                                   + sorted_phis[hi] * t;
+            }
+
+            // Sigma based on mean neuron spacing
+            double avg_spacing = (n_sorted > 1)
+                ? (sorted_phis.back() - sorted_phis.front()) / (n_sorted - 1)
+                : 1.0;
+            double sigma_phi = TUNING_SIGMA_CHANNELS * avg_spacing;
+            double inv_2sigma2 = 1.0 / (2.0 * sigma_phi * sigma_phi);
+
+            int k = std::min(OVERLAP_K, n_mel);
+            // For each input neuron, find K nearest bins, then invert
+            for (size_t a = 0; a < zone_info.input_neuron_indices.size(); a++) {
+                int nid = zone_info.input_neuron_indices[a];
+                double nphi = neuron_phis[a];
+                std::vector<std::pair<double, int>> dists(n_mel);
+                for (int m = 0; m < n_mel; m++) {
+                    dists[m] = {std::abs(channel_centers[m] - nphi), m};
+                }
+                std::partial_sort(dists.begin(), dists.begin() + k, dists.end());
+                for (int kk = 0; kk < k; kk++) {
+                    int mel_bin = dists[kk].second;
+                    double d = dists[kk].first;
+                    double w = std::exp(-d * d * inv_2sigma2);
+                    zone_info.input_neuron_mapping[mel_bin].push_back(nid);
+                    zone_info.input_neuron_weights[mel_bin].push_back(w);
+                }
+            }
         }
     }
 
