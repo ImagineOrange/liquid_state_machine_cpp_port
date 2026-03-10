@@ -1,6 +1,8 @@
 # Liquid State Machine — C++ Port
 
-<img src="image.png" alt="alt text" width="500">
+<p align="center">
+  <img src="image.png" alt="alt text" width="500">
+</p>
 
 A high-performance C++ implementation of a biologically-detailed Liquid State Machine (LSM) for spoken digit classification. This port replicates and extends the Python-based reservoir computing system from `phase_1_Networks_of_LIF_neurons/liquid_state_machine_expanded/`, providing ~100x speedup for parameter sweeps and grid searches.
 
