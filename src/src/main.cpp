@@ -23,6 +23,9 @@ int main(int argc, char** argv) {
     double input_tau_e_override = -1.0;
     double input_adapt_inc_override = -1.0;
     double input_std_u_override = -1.0;
+    double adapt_inc_override = -1.0;
+    double adapt_tau_override = -1.0;
+    double tonic_conductance_override = -1.0;
     bool input_grid = false;
     std::string input_grid_output = "input_grid_results.csv";
     bool mi_refine = false;
@@ -31,6 +34,7 @@ int main(int argc, char** argv) {
     int mi_refine_samples = 20;
     std::string mi_refine_output = "";
     std::string raster_dump = "";  // output dir for raster dump
+    bool wm_sweep = false;
 
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) == "--arms" && i + 1 < argc) arms = argv[++i];
@@ -60,6 +64,10 @@ int main(int argc, char** argv) {
         else if (std::string(argv[i]) == "--mi-refine-samples" && i + 1 < argc) mi_refine_samples = std::atoi(argv[++i]);
         else if (std::string(argv[i]) == "--mi-refine-output" && i + 1 < argc) mi_refine_output = argv[++i];
         else if (std::string(argv[i]) == "--raster-dump" && i + 1 < argc) raster_dump = argv[++i];
+        else if (std::string(argv[i]) == "--adapt-inc" && i + 1 < argc) adapt_inc_override = std::atof(argv[++i]);
+        else if (std::string(argv[i]) == "--adapt-tau" && i + 1 < argc) adapt_tau_override = std::atof(argv[++i]);
+        else if (std::string(argv[i]) == "--tonic-conductance" && i + 1 < argc) tonic_conductance_override = std::atof(argv[++i]);
+        else if (std::string(argv[i]) == "--wm-sweep") wm_sweep = true;
     }
 
     // Default: use network_snapshot.npz next to the binary if it exists
@@ -92,7 +100,9 @@ int main(int argc, char** argv) {
         fs::create_directories(raster_dump);
         return run_raster_dump(g_snapshot_path, trace_file, raster_dump,
                                stim_current_override, input_tau_e_override,
-                               input_adapt_inc_override);
+                               input_adapt_inc_override,
+                               adapt_inc_override, adapt_tau_override,
+                               tonic_conductance_override);
     }
 
     // --input-grid mode
@@ -119,6 +129,15 @@ int main(int argc, char** argv) {
         return run_mi_refine(argc, argv, g_snapshot_path, data_dir,
                               n_workers, mi_refine_input, mi_refine_top,
                               mi_refine_samples, mi_refine_output);
+    }
+
+    // --wm-sweep mode
+    if (wm_sweep) {
+        if (output_dir.empty()) {
+            output_dir = (base_dir / "results" / "wm_adaptation_sweep").string();
+        }
+        fs::create_directories(output_dir);
+        return run_wm_sweep(argc, argv, n_workers, output_dir, data_dir);
     }
 
     // Default: classification adaptation sweep

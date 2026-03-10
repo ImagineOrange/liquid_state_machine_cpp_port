@@ -206,7 +206,7 @@ def main():
     fig = plt.figure(figsize=(10, 10))
     gs = gridspec.GridSpec(n_panels, 1, figure=fig,
                            height_ratios=[0.7, 0.7, 0.8, 1.1, 0.55],
-                           hspace=0.08)
+                           hspace=0.25)
 
     axes = [fig.add_subplot(gs[i]) for i in range(n_panels)]
     for ax in axes[1:]:
@@ -250,10 +250,8 @@ def main():
                 ha='center', va='center', fontsize=9, color='#999')
         ax.set_ylabel('Mel bin')
     mark_epochs(ax)
-    ax.text(0.005, 0.88, 'A', transform=ax.transAxes, fontsize=13,
-            fontweight='bold', va='top', color='#333')
-    ax.text(0.04, 0.88, f'Mel spectrogram — digit {digit} ({wav_name})',
-            transform=ax.transAxes, fontsize=8.5, va='top', color='#555')
+    ax.set_title(f'A   Mel spectrogram — digit {digit} ({wav_name})',
+                 loc='left', fontsize=9, color='#333', pad=4)
     ax.tick_params(labelbottom=False)
 
     # ── B: BSA Input ──
@@ -265,10 +263,8 @@ def main():
     ax.set_ylim(-2, 130)
     ax.set_yticks([0, 32, 64, 96, 127])
     mark_epochs(ax)
-    ax.text(0.005, 0.92, 'B', transform=ax.transAxes, fontsize=13,
-            fontweight='bold', va='top')
-    ax.text(0.04, 0.92, f'BSA encoding  ({len(bt):,} spikes)',
-            transform=ax.transAxes, fontsize=8.5, va='top', color='#444')
+    ax.set_title(f'B   BSA encoding  ({len(bt):,} spikes)',
+                 loc='left', fontsize=9, color='#333', pad=4)
     ax.tick_params(labelbottom=False)
 
     # ── C: Input shell raster (tonotopic) ──
@@ -284,11 +280,9 @@ def main():
     ax.set_ylabel('Input neuron\n(tonotopic)')
     ax.set_ylim(-2, max(n_active_input, 1) + 2)
     mark_epochs(ax)
-    ax.text(0.005, 0.95, 'C', transform=ax.transAxes, fontsize=13,
-            fontweight='bold', va='top')
-    ax.text(0.04, 0.95, f'Input shell — {n_active_input}/{n_input} active, '
-            f'{input_rate:.0f} Hz/neuron',
-            transform=ax.transAxes, fontsize=8.5, va='top', color='#444')
+    ax.set_title(f'C   Input shell — {n_active_input}/{n_input} active, '
+                 f'{input_rate:.0f} Hz/neuron',
+                 loc='left', fontsize=9, color='#333', pad=4)
     ax.tick_params(labelbottom=False)
 
     # ── D: Reservoir raster (tonotopic) ──
@@ -308,33 +302,52 @@ def main():
     ax.set_ylabel('Reservoir neuron\n(tonotopic)')
     ax.set_ylim(-5, max(n_active_res, 1) + 5)
     mark_epochs(ax)
-    ax.text(0.005, 0.97, 'D', transform=ax.transAxes, fontsize=13,
-            fontweight='bold', va='top')
-    ax.text(0.04, 0.97, f'Reservoir — {n_active_res}/{n_reservoir} active, '
-            f'{res_rate:.0f} Hz/neuron',
-            transform=ax.transAxes, fontsize=8.5, va='top', color='#444')
+    ax.set_title(f'D   Reservoir — {n_active_res}/{n_reservoir} active, '
+                 f'{res_rate:.0f} Hz/neuron',
+                 loc='left', fontsize=9, color='#333', pad=4)
     ax.tick_params(labelbottom=False)
 
-    # ── E: Population PSTH ──
+    # ── E: Layer-wise PSTH ──
     ax = axes[4]
     psth_bin = 2.0
     bins_arr = np.arange(0, total_ms + psth_bin, psth_bin)
-    all_t = spikes['time_ms'].values
-    counts, edges = np.histogram(all_t, bins=bins_arr)
-    rate_hz = counts / (psth_bin / 1000)
-    centers = edges[:-1] + psth_bin / 2
+    centers = bins_arr[:-1] + psth_bin / 2
 
-    ax.fill_between(centers, rate_hz, alpha=0.3, color='#3a7ebf', linewidth=0)
-    ax.plot(centers, rate_hz, color='#1a5a9e', lw=0.6, alpha=0.8)
+    # Load E/I identity from snapshot
+    snap = np.load(SNAPSHOT)
+    is_inh = snap['is_inhibitory'].astype(bool)
+
+    # Split spikes by layer
+    input_t = input_spikes['time_ms'].values
+    res_exc_mask = (spikes['zone'] == 'reservoir') & \
+                   spikes['neuron_id'].map(lambda nid: not is_inh[nid] if nid < len(is_inh) else True)
+    res_inh_mask = (spikes['zone'] == 'reservoir') & \
+                   spikes['neuron_id'].map(lambda nid: is_inh[nid] if nid < len(is_inh) else False)
+    res_exc_t = spikes.loc[res_exc_mask, 'time_ms'].values
+    res_inh_t = spikes.loc[res_inh_mask, 'time_ms'].values
+
+    # Gaussian-smoothed firing rates
+    from scipy.ndimage import gaussian_filter1d
+    sigma = 5.0 / psth_bin  # 5ms smoothing kernel
+
+    layers = [
+        ('Input Arc', input_t, '#2d8a4e', n_active_input),
+        ('Reservoir E', res_exc_t, '#cc3333', max(1, n_reservoir - int(is_inh.sum()))),
+        ('Reservoir I', res_inh_t, '#3a7ebf', max(1, int(is_inh.sum()))),
+    ]
+    for label, times, color, n_neurons in layers:
+        counts, _ = np.histogram(times, bins=bins_arr)
+        rate_hz = counts / (psth_bin / 1000) / max(n_neurons, 1)
+        smoothed = gaussian_filter1d(rate_hz.astype(float), sigma)
+        ax.plot(centers, smoothed, color=color, lw=1.2, label=label)
+        ax.fill_between(centers, smoothed, alpha=0.15, color=color, linewidth=0)
+
     mark_epochs(ax)
-    ax.set_ylabel('Pop. rate\n(spk/s)')
+    ax.set_ylabel('Rate (Hz)')
     ax.set_xlabel('Time (ms)')
-    mean_rate = len(all_t) / (total_ms / 1000)
-    ax.text(0.005, 0.90, 'E', transform=ax.transAxes, fontsize=13,
-            fontweight='bold', va='top')
-    ax.text(0.04, 0.90, f'Population PSTH ({psth_bin:.0f}ms bins) — '
-            f'{len(all_t):,} spikes, {mean_rate:,.0f} spk/s mean',
-            transform=ax.transAxes, fontsize=8.5, va='top', color='#444')
+    ax.legend(loc='upper right', fontsize=7, framealpha=0.8)
+    ax.set_title(f'E   Layer PSTH ({psth_bin:.0f}ms bins, per-neuron rate)',
+                 loc='left', fontsize=9, color='#333', pad=4)
     ax.set_xlim(0, total_ms)
     ax.yaxis.set_major_locator(plt.MaxNLocator(4))
 

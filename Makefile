@@ -30,6 +30,7 @@ INCDIR = src/inc
 SRCS = $(SRCDIR)/main.cpp \
        $(SRCDIR)/input_grid.cpp \
        $(SRCDIR)/classification.cpp \
+       $(SRCDIR)/wm_sweep.cpp \
        $(SRCDIR)/ml.cpp \
        $(SRCDIR)/network.cpp \
        $(SRCDIR)/builder.cpp \

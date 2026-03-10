@@ -659,7 +659,10 @@ int run_raster_dump(const std::string& snapshot_path,
                     const std::string& output_dir,
                     double stim_current_override,
                     double input_tau_e_override,
-                    double input_adapt_inc_override) {
+                    double input_adapt_inc_override,
+                    double adapt_inc_override,
+                    double adapt_tau_override,
+                    double tonic_conductance_override) {
     // Load audio sample
     auto nf = load_npz(trace_file);
     AudioSample s;
@@ -692,8 +695,10 @@ int run_raster_dump(const std::string& snapshot_path,
     DynamicalOverrides dyn_ovr;
     dyn_ovr.shell_core_mult = LHS021_SHELL_CORE_MULT;
     dyn_ovr.core_core_mult = LHS021_CORE_CORE_MULT;
-    dyn_ovr.adapt_inc = LHS021_ADAPT_INC;
+    dyn_ovr.adapt_inc = (adapt_inc_override >= 0) ? adapt_inc_override : LHS021_ADAPT_INC;
     dyn_ovr.nmda_tau = FIXED_NMDA_TAU;
+    if (adapt_tau_override > 0)
+        dyn_ovr.adapt_tau = adapt_tau_override;
 
     SphericalNetwork net;
     ZoneInfo zone_info;
@@ -720,6 +725,21 @@ int run_raster_dump(const std::string& snapshot_path,
             net.adaptation_increment[idx] = input_adapt_inc_override;
         printf("  Input adapt_inc overridden to %.4f\n", input_adapt_inc_override);
     }
+    if (adapt_inc_override >= 0)
+        printf("  Reservoir adapt_inc overridden to %.4f nS\n", adapt_inc_override);
+    if (adapt_tau_override > 0)
+        printf("  Reservoir adapt_tau overridden to %.1f ms\n", adapt_tau_override);
+
+    // Apply tonic conductance if specified (rate-matching)
+    double g_tonic_used = 0.0;
+    if (tonic_conductance_override >= 0) {
+        g_tonic_used = tonic_conductance_override;
+        set_reservoir_tonic_conductance(net, zone_info, tonic_conductance_override, -80.0);
+        printf("  Tonic conductance set to %.4f nS (E_rev=-80 mV)\n", tonic_conductance_override);
+    }
+
+    // Seed RNG (raster dump is single-threaded, not launched from OMP block)
+    rng_seed(42);
 
     // Run simulation
     double total_ms = sim.audio_duration_ms + sim.post_stimulus_ms;
@@ -843,6 +863,9 @@ int run_raster_dump(const std::string& snapshot_path,
     fprintf(f, "  \"n_input\": %d,\n", (int)zone_info.input_neuron_indices.size());
     fprintf(f, "  \"n_reservoir\": %d,\n", (int)zone_info.reservoir_zone_indices.size());
     fprintf(f, "  \"n_total\": %d,\n", net.n_neurons);
+    fprintf(f, "  \"adapt_inc\": %.6f,\n", dyn_ovr.adapt_inc);
+    fprintf(f, "  \"adapt_tau\": %.1f,\n", dyn_ovr.adapt_tau);
+    fprintf(f, "  \"tonic_conductance\": %.6f,\n", g_tonic_used);
     fprintf(f, "  \"digit\": %d,\n", s.digit);
     fprintf(f, "  \"filename\": \"%s\"\n", fname.c_str());
     fprintf(f, "}\n");

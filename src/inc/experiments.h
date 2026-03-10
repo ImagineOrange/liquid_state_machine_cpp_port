@@ -423,7 +423,10 @@ int run_raster_dump(const std::string& snapshot_path,
                     const std::string& output_dir,
                     double stim_current_override,
                     double input_tau_e_override,
-                    double input_adapt_inc_override);
+                    double input_adapt_inc_override,
+                    double adapt_inc_override = -1.0,
+                    double adapt_tau_override = -1.0,
+                    double tonic_conductance_override = -1.0);
 
 int run_classification_sweep(int argc, char** argv, const std::string& arms,
                               int n_workers, const std::string& output_dir,
@@ -437,3 +440,7 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
                               double input_tau_e_override,
                               double input_adapt_inc_override,
                               double input_std_u_override);
+
+int run_wm_sweep(int argc, char** argv,
+                  int n_workers, const std::string& output_dir,
+                  const std::string& data_dir);
