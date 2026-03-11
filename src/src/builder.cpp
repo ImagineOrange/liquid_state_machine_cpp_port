@@ -513,7 +513,7 @@ RunResult run_sample_with_std(SphericalNetwork& net, const AudioSample& sample,
                               const ZoneInfo& zone_info, const SimConfig& sim_cfg,
                               double std_u, double std_tau_rec,
                               const StdMasks& masks,
-                              double record_adapt_at_ms) {
+                              const std::vector<double>& record_adapt_at_ms) {
     net.reset_all();
     bool use_std = std_u > 0.0 && !masks.std_eligible.empty();
 
@@ -559,9 +559,13 @@ RunResult run_sample_with_std(SphericalNetwork& net, const AudioSample& sample,
         input_last_time.assign(n_neurons, -1e9);
     }
 
-    bool record_adapt = record_adapt_at_ms >= 0;
-    int adapt_step = record_adapt ? std::max(0, (int)(record_adapt_at_ms / dt)) : -1;
-    bool adapt_recorded = false;
+    // Multi-snapshot: sort timepoints and convert to step numbers
+    std::vector<int> adapt_steps;
+    for (double t : record_adapt_at_ms) {
+        if (t >= 0) adapt_steps.push_back(std::max(0, (int)(t / dt)));
+    }
+    std::sort(adapt_steps.begin(), adapt_steps.end());
+    size_t next_adapt_idx = 0;
 
     RunResult result;
     result.activity_record.resize(n_steps);
@@ -613,10 +617,19 @@ RunResult run_sample_with_std(SphericalNetwork& net, const AudioSample& sample,
         auto active = net.update_network(dt);
         result.activity_record[step] = active;
 
-        // Adaptation snapshot
-        if (record_adapt && !adapt_recorded && step >= adapt_step) {
-            result.adapt_snapshot = net.adaptation;
-            adapt_recorded = true;
+        // State snapshots at requested timepoints
+        while (next_adapt_idx < adapt_steps.size() && step >= adapt_steps[next_adapt_idx]) {
+            result.adapt_snapshots.push_back(net.adaptation);
+            result.nmda_snapshots.push_back(net.g_nmda);
+            result.ge_snapshots.push_back(net.g_e);
+            // STD resource: copy if active, otherwise all-ones (no depression)
+            if (use_std && !x_resource.empty()) {
+                result.std_resource_snapshots.push_back(x_resource);
+            } else {
+                result.std_resource_snapshots.push_back(
+                    std::vector<double>(net.n_neurons, 1.0));
+            }
+            next_adapt_idx++;
         }
 
         // STD

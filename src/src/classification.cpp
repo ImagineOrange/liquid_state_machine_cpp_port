@@ -100,7 +100,7 @@ static WorkerResult sim_worker(SphericalNetwork& net, const AudioSample& sample,
                                             sample.spike_times_ms.end());
 
     auto result = run_sample_with_std(net, sample, zone_info, sim_cfg,
-                                       STD_U, STD_TAU_REC, masks, stim_end_ms);
+                                       STD_U, STD_TAU_REC, masks, {stim_end_ms});
 
     auto br = bin_activity_record(result.activity_record, zone_info.reservoir_zone_indices,
                                    dt, BIN_MS, n_bins);
@@ -994,7 +994,7 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
 
         auto result = run_sample_with_std(net, s, zone_info, trace_sim,
                                            STD_U, STD_TAU_REC, masks,
-                                           trace_sim.audio_duration_ms);
+                                           {trace_sim.audio_duration_ms});
 
         printf("  %d timesteps recorded\n", (int)net.trace.size());
 
@@ -1101,7 +1101,7 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
 
         auto result = run_sample_with_std(net, samples[trace_sample], zone_info, trace_sim,
                                            STD_U, STD_TAU_REC, masks,
-                                           trace_sim.audio_duration_ms);
+                                           {trace_sim.audio_duration_ms});
 
         printf("  %d timesteps recorded\n", (int)net.trace.size());
 

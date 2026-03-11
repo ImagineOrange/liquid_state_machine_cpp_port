@@ -444,3 +444,7 @@ int run_classification_sweep(int argc, char** argv, const std::string& arms,
 int run_wm_sweep(int argc, char** argv,
                   int n_workers, const std::string& output_dir,
                   const std::string& data_dir);
+
+int run_serial_sweep(int argc, char** argv,
+                     int n_workers, const std::string& output_dir,
+                     const std::string& data_dir);

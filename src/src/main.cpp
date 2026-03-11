@@ -35,6 +35,7 @@ int main(int argc, char** argv) {
     std::string mi_refine_output = "";
     std::string raster_dump = "";  // output dir for raster dump
     bool wm_sweep = false;
+    bool serial_sweep = false;
 
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) == "--arms" && i + 1 < argc) arms = argv[++i];
@@ -68,6 +69,7 @@ int main(int argc, char** argv) {
         else if (std::string(argv[i]) == "--adapt-tau" && i + 1 < argc) adapt_tau_override = std::atof(argv[++i]);
         else if (std::string(argv[i]) == "--tonic-conductance" && i + 1 < argc) tonic_conductance_override = std::atof(argv[++i]);
         else if (std::string(argv[i]) == "--wm-sweep") wm_sweep = true;
+        else if (std::string(argv[i]) == "--serial-sweep") serial_sweep = true;
     }
 
     // Default: use network_snapshot.npz next to the binary if it exists
@@ -129,6 +131,15 @@ int main(int argc, char** argv) {
         return run_mi_refine(argc, argv, g_snapshot_path, data_dir,
                               n_workers, mi_refine_input, mi_refine_top,
                               mi_refine_samples, mi_refine_output);
+    }
+
+    // --serial-sweep mode
+    if (serial_sweep) {
+        if (output_dir.empty()) {
+            output_dir = (base_dir / "results" / "serial_classification_adaptation_sweep").string();
+        }
+        fs::create_directories(output_dir);
+        return run_serial_sweep(argc, argv, n_workers, output_dir, data_dir);
     }
 
     // --wm-sweep mode

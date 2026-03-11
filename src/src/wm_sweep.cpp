@@ -336,7 +336,7 @@ static WmWorkerResult wm_sim_worker(SphericalNetwork& net, const XorPair& pair,
     // Run the compound sample through the network
     auto result = run_sample_with_std(net, pair.compound, zone_info, sim_cfg,
                                        STD_U, STD_TAU_REC, masks,
-                                       pair.stim_b_offset_ms);  // record adapt at B onset
+                                       {pair.stim_b_offset_ms});  // record adapt at B onset
 
     // Epoch binning
     EpochBounds eb = compute_epoch_bounds(pair);
@@ -379,9 +379,9 @@ static WmWorkerResult wm_sim_worker(SphericalNetwork& net, const XorPair& pair,
 
     // Mean adaptation at B onset
     double adapt_mean = 0;
-    if (!result.adapt_snapshot.empty()) {
+    if (!result.adapt_snapshots.empty() && !result.adapt_snapshots[0].empty()) {
         for (int nid : zone_info.reservoir_zone_indices)
-            adapt_mean += result.adapt_snapshot[nid];
+            adapt_mean += result.adapt_snapshots[0][nid];
         adapt_mean /= zone_info.reservoir_zone_indices.size();
     }
 

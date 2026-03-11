@@ -190,7 +190,7 @@ int run_input_grid(int argc, char** argv, const std::string& snapshot_path,
 
                 auto result = run_sample_with_std(net, samples[si], zone_info, sim,
                                                    STD_U, STD_TAU_REC, masks,
-                                                   stim_ends[si]);
+                                                   {stim_ends[si]});
 
                 std::unordered_map<int, std::vector<double>> neuron_spikes, neuron_bsa;
                 build_spike_maps(result, zone_info, samples[si], sim.dt,
@@ -535,7 +535,7 @@ int run_mi_refine(int argc, char** argv, const std::string& snapshot_path,
 
                 auto result = run_sample_with_std(net, samples[si], zone_info, sim,
                                                    STD_U, STD_TAU_REC, masks,
-                                                   stim_ends[si]);
+                                                   {stim_ends[si]});
 
                 std::unordered_map<int, std::vector<double>> neuron_spikes, neuron_bsa;
                 build_spike_maps(result, zone_info, samples[si], sim.dt,

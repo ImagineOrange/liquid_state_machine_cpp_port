@@ -93,14 +93,17 @@ struct SimConfig {
 
 struct RunResult {
     std::vector<std::vector<int>> activity_record;
-    std::vector<double> adapt_snapshot;
+    std::vector<std::vector<double>> adapt_snapshots;
+    std::vector<std::vector<double>> nmda_snapshots;         // g_nmda per neuron
+    std::vector<std::vector<double>> std_resource_snapshots;  // x_resource per neuron (recurrent STD)
+    std::vector<std::vector<double>> ge_snapshots;            // g_e (AMPA) per neuron
 };
 
 RunResult run_sample_with_std(SphericalNetwork& net, const AudioSample& sample,
                               const ZoneInfo& zone_info, const SimConfig& sim_cfg,
                               double std_u, double std_tau_rec,
                               const StdMasks& masks,
-                              double record_adapt_at_ms = -1.0);
+                              const std::vector<double>& record_adapt_at_ms = {});
 
 void build_full_network(SphericalNetwork& net, ZoneInfo& zone_info,
                         const NetworkConfig& cfg, double dt,

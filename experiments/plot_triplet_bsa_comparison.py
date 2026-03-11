@@ -52,8 +52,8 @@ def _format_inc_labels(inc_vals):
     return labels
 
 
-def _welch_t_one_sided(cell_reps, bsa_mean, bsa_sample_std, bsa_n):
-    """One-sided Welch t-test: H1 = cell > BSA."""
+def _welch_t_two_sided(cell_reps, bsa_mean, bsa_sample_std, bsa_n):
+    """Two-sided Welch t-test: H1 = cell ≠ BSA."""
     cell_mean = np.mean(cell_reps)
     cell_std = np.std(cell_reps, ddof=1)
     cell_n = len(cell_reps)
@@ -65,8 +65,8 @@ def _welch_t_one_sided(cell_reps, bsa_mean, bsa_sample_std, bsa_n):
     denom = ((bsa_sample_std**2 / bsa_n)**2 / (bsa_n - 1) +
              (cell_std**2 / cell_n)**2 / (cell_n - 1))
     df = num / denom if denom > 0 else 1.0
-    p_one = stats.t.sf(t_stat, df)
-    return t_stat, p_one
+    p_two = 2 * stats.t.sf(abs(t_stat), df)
+    return t_stat, p_two
 
 
 def _benjamini_hochberg(p_values):
@@ -266,7 +266,7 @@ def _compute_sig(reps_a, reps_b, acc_a, acc_b, bsa_mean, bsa_sample_std, bsa_n=5
         for i in range(n_inc):
             for j in range(n_tau):
                 if reps_grid[i, j] is not None:
-                    _, p = _welch_t_one_sided(reps_grid[i, j], bsa_mean,
+                    _, p = _welch_t_two_sided(reps_grid[i, j], bsa_mean,
                                               bsa_sample_std, bsa_n)
                     pvals_all.append(p)
                     coords_all.append((br_name, i, j))
@@ -282,7 +282,7 @@ def _compute_sig(reps_a, reps_b, acc_a, acc_b, bsa_mean, bsa_sample_std, bsa_n=5
     sig_b = np.full((n_inc, n_tau), False)
     for idx, (branch, i, j) in enumerate(coords_all):
         gap = gap_a[i, j] if branch == 'A' else gap_b[i, j]
-        if adj_pvals[idx] < 0.05 and gap > 0:
+        if adj_pvals[idx] < 0.05:
             if branch == 'A':
                 sig_a[i, j] = True
             else:
