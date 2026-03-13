@@ -36,6 +36,9 @@ int main(int argc, char** argv) {
     std::string raster_dump = "";  // output dir for raster dump
     bool wm_sweep = false;
     bool serial_sweep = false;
+    bool noisy_sweep = false;
+    std::string noisy_taus_str = "";
+    bool noisy_per_bin = false;
 
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) == "--arms" && i + 1 < argc) arms = argv[++i];
@@ -70,6 +73,9 @@ int main(int argc, char** argv) {
         else if (std::string(argv[i]) == "--tonic-conductance" && i + 1 < argc) tonic_conductance_override = std::atof(argv[++i]);
         else if (std::string(argv[i]) == "--wm-sweep") wm_sweep = true;
         else if (std::string(argv[i]) == "--serial-sweep") serial_sweep = true;
+        else if (std::string(argv[i]) == "--noisy-sweep") noisy_sweep = true;
+        else if (std::string(argv[i]) == "--noisy-taus" && i + 1 < argc) noisy_taus_str = argv[++i];
+        else if (std::string(argv[i]) == "--noisy-per-bin") noisy_per_bin = true;
     }
 
     // Default: use network_snapshot.npz next to the binary if it exists
@@ -140,6 +146,25 @@ int main(int argc, char** argv) {
         }
         fs::create_directories(output_dir);
         return run_serial_sweep(argc, argv, n_workers, output_dir, data_dir);
+    }
+
+    // --noisy-sweep mode
+    if (noisy_sweep) {
+        if (output_dir.empty()) {
+            output_dir = (base_dir / "results" / "noisy_classification_sweep").string();
+        }
+        fs::create_directories(output_dir);
+        // Parse tau values: default pilot (5000 only), or comma-separated
+        std::vector<double> tau_values = {5000.0};
+        if (!noisy_taus_str.empty()) {
+            tau_values.clear();
+            std::istringstream iss(noisy_taus_str);
+            std::string tok;
+            while (std::getline(iss, tok, ',')) {
+                tau_values.push_back(std::atof(tok.c_str()));
+            }
+        }
+        return run_noisy_sweep(argc, argv, n_workers, output_dir, data_dir, tau_values, noisy_per_bin);
     }
 
     // --wm-sweep mode

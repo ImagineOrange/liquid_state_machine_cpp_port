@@ -448,3 +448,9 @@ int run_wm_sweep(int argc, char** argv,
 int run_serial_sweep(int argc, char** argv,
                      int n_workers, const std::string& output_dir,
                      const std::string& data_dir);
+
+int run_noisy_sweep(int argc, char** argv,
+                     int n_workers, const std::string& output_dir,
+                     const std::string& data_dir,
+                     const std::vector<double>& tau_values,
+                     bool do_per_bin = false);

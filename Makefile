@@ -31,6 +31,7 @@ SRCS = $(SRCDIR)/main.cpp \
        $(SRCDIR)/input_grid.cpp \
        $(SRCDIR)/classification.cpp \
        $(SRCDIR)/wm_sweep.cpp \
+       $(SRCDIR)/noisy_classification.cpp \
        $(SRCDIR)/online_classification.cpp \
        $(SRCDIR)/ml.cpp \
        $(SRCDIR)/network.cpp \
