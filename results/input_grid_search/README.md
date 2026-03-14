@@ -65,22 +65,22 @@ score = 0                                                 (otherwise)
 The top 50 configurations occupy a narrow performance band (score 1.172–1.236) and share common characteristics:
 
 **Parameter regime:**
-- **Adaptation: near-zero dominates.** 23 of the top 50 have `adapt_inc = 0.0`; all 50 have `adapt_inc <= 0.016` (values: 0.0, 0.005, 0.0158). Adaptation destroys temporal information by smoothing the spike response — the MI landscape shows a steep drop-off above adapt_inc = 0.05.
-- **stim x tau_e trade-off.** The top configs span a wide range of both stim_current (0.014–5.0) and tau_e (0.05–3.55ms), but along a **constant-rate isocline** at ~80–95 Hz. Low stim requires high tau_e (longer integration window to accumulate enough drive), high stim requires low tau_e (fast decay prevents saturation). The product `stim * tau_e` is roughly constant across the top configs.
-- **STD is weakly harmful.** The top 4 configs all have `std_u = 0`. Mild STD (`std_u = 0.10–0.25`) appears in some top-50 entries but always with slightly lower r@20ms, compensated by marginally higher MI from rate redistribution.
+- **Adaptation: near-zero dominates.** 23 of the top 50 have `adapt_inc = 0.0`; all 50 have `adapt_inc <= 0.016` (values: 0.0, 0.005, 0.0158). MI drops steeply above adapt_inc = 0.05.
+- **stim × tau_e trade-off.** The top configs span a wide range of both stim_current (0.014–5.0) and tau_e (0.05–3.55ms), but along a constant-rate isocline at ~80–95 Hz. The product `stim * tau_e` is approximately constant across the top configs.
+- **STD reduces performance slightly.** The top 4 configs all have `std_u = 0`. Mild STD (`std_u = 0.10–0.25`) appears in some top-50 entries but with slightly lower r@20ms.
 
-**Mutual information capacity:**
-- MI peaks at **~1.06 bits** out of a theoretical maximum of 3.0 bits (8-quantile). This reflects the fundamental information bottleneck: 124 input neurons encode 128 mel-frequency channels through overlapping Gaussian tuning curves (K=4 nearest channels per neuron).
-- The MI plateau is remarkably flat across the top 50 (1.004–1.066 bits), suggesting the ~1.05 bit ceiling is a property of the network topology and input encoding scheme, not the dynamical parameters. The parameters control *whether* this ceiling is reached (by getting neurons into the right firing regime) but cannot exceed it.
-- The r@20ms tiebreaker separates configs within the MI plateau: low-stim/high-tau_e configs achieve r@20ms ~ 0.88 (smooth conductance tracking), while high-stim/low-tau_e configs drop to r@20ms ~ 0.73 (noisier due to faster synaptic dynamics).
+**Mutual information:**
+- MI peaks at **~1.06 bits** out of a theoretical maximum of 3.0 bits (8-quantile). 124 input neurons encode 128 mel-frequency channels through overlapping Gaussian tuning curves (K=4 nearest channels per neuron).
+- The MI range across the top 50 is narrow (1.004–1.066 bits). No parameter combination in the search exceeded ~1.07 bits.
+- The r@20ms tiebreaker separates configs within the MI plateau: low-stim/high-tau_e configs achieve r@20ms ~ 0.88, while high-stim/low-tau_e configs drop to r@20ms ~ 0.73.
 
-**Firing rate regime:**
-- All top-50 configs fire at 77–95 Hz. This is well within the bio-valid range (5–150 Hz) and corresponds to mean ISI ~ 10–13ms at CV ~ 0.45–0.52 — regular, stimulus-locked firing.
-- Below ~60 Hz, neurons miss temporal features in the BSA input. Above ~100 Hz, neurons begin saturating and lose modulation depth.
+**Firing rate:**
+- All top-50 configs fire at 77–95 Hz (within bio-valid range 5–150 Hz), mean ISI ~ 10–13ms, CV ~ 0.45–0.52.
+- Below ~60 Hz, MI decreases. Above ~100 Hz, modulation depth decreases.
 
 ![t-SNE of parameter space](tsne_parameter_space.png)
 
-*t-SNE embedding of the 8,000-point parameter space (features: log(stim_current), log(tau_e), log(adapt_inc), std_u, std_tau_rec; perplexity=50). Left: composite score. Center: pooled MI. Right: firing rate. Top 50 configurations highlighted with colored borders. The top configs cluster in a narrow region of parameter space corresponding to moderate firing rates (80–95 Hz) with zero or near-zero adaptation.*
+*t-SNE embedding of the 8,000-point parameter space (features: log(stim_current), log(tau_e), log(adapt_inc), std_u, std_tau_rec; perplexity=50). Left: composite score. Center: pooled MI. Right: firing rate. Top 50 configurations highlighted with colored borders.*
 
 ## Figures
 

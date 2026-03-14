@@ -48,6 +48,17 @@ RidgeResult ridge_fold_solve(const RidgeFoldContext& ctx,
                               const Mat& X_test, const std::vector<int>& y_test,
                               double alpha);
 
+// Ridge fit on all data with given alpha, returning primal weights W = X^T * alpha_mat
+// W has shape (n_features x n_classes), intercepts has length n_classes
+struct RidgePrimalWeights {
+    Mat weights;              // (n_features x n_classes)
+    std::vector<double> intercepts;  // (n_classes) — zero in dual form (no explicit intercept)
+    double accuracy;          // training accuracy
+};
+
+RidgePrimalWeights ridge_extract_weights(const Mat& X, const std::vector<int>& y,
+                                          double alpha, const std::vector<int>& classes);
+
 // Accuracy score
 double accuracy_score(const std::vector<int>& y_true, const std::vector<int>& y_pred);
 

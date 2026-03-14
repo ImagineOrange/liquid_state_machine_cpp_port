@@ -39,6 +39,8 @@ int main(int argc, char** argv) {
     bool noisy_sweep = false;
     std::string noisy_taus_str = "";
     bool noisy_per_bin = false;
+    bool mech_interp = false;
+    bool mech_raster = false;
 
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) == "--arms" && i + 1 < argc) arms = argv[++i];
@@ -76,6 +78,8 @@ int main(int argc, char** argv) {
         else if (std::string(argv[i]) == "--noisy-sweep") noisy_sweep = true;
         else if (std::string(argv[i]) == "--noisy-taus" && i + 1 < argc) noisy_taus_str = argv[++i];
         else if (std::string(argv[i]) == "--noisy-per-bin") noisy_per_bin = true;
+        else if (std::string(argv[i]) == "--mech-interp") mech_interp = true;
+        else if (std::string(argv[i]) == "--mech-raster") mech_raster = true;
     }
 
     // Default: use network_snapshot.npz next to the binary if it exists
@@ -165,6 +169,24 @@ int main(int argc, char** argv) {
             }
         }
         return run_noisy_sweep(argc, argv, n_workers, output_dir, data_dir, tau_values, noisy_per_bin);
+    }
+
+    // --mech-raster mode (quick: 2 trials only)
+    if (mech_raster) {
+        if (output_dir.empty()) {
+            output_dir = (base_dir / "results" / "mechanistic_interp").string();
+        }
+        fs::create_directories(output_dir);
+        return run_mech_raster(n_workers, output_dir, data_dir);
+    }
+
+    // --mech-interp mode
+    if (mech_interp) {
+        if (output_dir.empty()) {
+            output_dir = (base_dir / "results" / "mechanistic_interp").string();
+        }
+        fs::create_directories(output_dir);
+        return run_mechanistic_interp(argc, argv, n_workers, output_dir, data_dir);
     }
 
     // --wm-sweep mode

@@ -150,7 +150,10 @@ static std::vector<AudioSample> make_unstructured_noise(
         double stim_dur = *std::max_element(samples[i].spike_times_ms.begin(),
                                              samples[i].spike_times_ms.end());
 
-        int n_noise = (int)(mean_bsa_count * noise_ratio);
+        // Uniform random spikes need much higher power to degrade classification
+        // (no digit-correlated structure to exploit)
+        constexpr double UNSTRUCTURED_POWER_MULT = 10.0;
+        int n_noise = (int)(mean_bsa_count * noise_ratio * UNSTRUCTURED_POWER_MULT);
 
         std::uniform_real_distribution<double> time_dist(0.0, stim_dur);
         std::uniform_int_distribution<int> chan_dist(0, 127);
@@ -666,7 +669,7 @@ static void noisy_save_checkpoint(const std::string& results_dir,
     fprintf(f, "  \"digits\": [0, 1, 2, 3, 4],\n");
     fprintf(f, "  \"n_samples\": %d,\n", SAMPLES_PER_DIGIT * N_DIGITS);
     fprintf(f, "  \"noise_levels\": "); json_write_double_array(f, NOISE_LEVELS); fprintf(f, ",\n");
-    fprintf(f, "  \"noise_types\": [\"structured\", \"unstructured\"],\n");
+    fprintf(f, "  \"noise_types\": [\"structured\"],\n");
     fprintf(f, "  \"rate_matching\": {\"target_rate_hz\": %.2f, \"tolerance_hz\": %.1f},\n",
             target_rate_hz, RATE_TOLERANCE_HZ);
 
@@ -713,7 +716,7 @@ int run_noisy_sweep(int argc, char** argv,
     printf("  NOISY CLASSIFICATION ADAPTATION SWEEP (C++ PORT)\n");
     printf("  Grid: %d inc x %d tau = %d SFA points x 2 branches\n",
            (int)NOISY_INC.size(), (int)taus.size(), n_grid);
-    printf("  Noise conditions: structured distractor + unstructured noise\n");
+    printf("  Noise conditions: structured distractor\n");
     printf("  Noise levels: %d values per condition\n", (int)NOISE_LEVELS.size());
     printf("  Task: 5-class digit classification (digits 0-4)\n");
     printf("  Samples: %d per digit = %d total\n", SAMPLES_PER_DIGIT, SAMPLES_PER_DIGIT * N_DIGITS);
@@ -771,7 +774,7 @@ int run_noisy_sweep(int argc, char** argv,
     double target_rate_hz = RATE_TARGET_HZ;
 
     // Noise conditions
-    const std::vector<std::string> noise_types = {"structured", "unstructured"};
+    const std::vector<std::string> noise_types = {"structured"};
 
     std::vector<std::string> grid_results_json;
     std::vector<std::string> bsa_baselines_json;
@@ -808,13 +811,8 @@ int run_noisy_sweep(int argc, char** argv,
 
             auto& cond = precomputed[nt][nl];
 
-            // Create noisy samples
-            if (noise_type == "structured") {
-                cond.noisy_samples = make_structured_noise(samples, noise_level, noise_seed, cond.distractor_digits);
-            } else {
-                cond.noisy_samples = make_unstructured_noise(samples, noise_level, mean_bsa_count, noise_seed);
-                cond.distractor_digits.assign(n_samples, -1);
-            }
+            // Create noisy samples (structured distractor only)
+            cond.noisy_samples = make_structured_noise(samples, noise_level, noise_seed, cond.distractor_digits);
 
             // Mean spike count
             cond.noisy_mean_spikes = 0;
@@ -892,7 +890,6 @@ int run_noisy_sweep(int argc, char** argv,
             auto& distractor_digits = cond.distractor_digits;
             auto& noisy_per_sample_last_bin = cond.noisy_per_sample_last_bin;
             auto& bsa_cls = cond.bsa_cls;
-            auto& bsa_last = cond.bsa_last;
 
             printf("  Mean spike count: %.1f (clean: %.1f, ratio: %.2f)\n",
                    cond.noisy_mean_spikes, mean_bsa_count, cond.noisy_mean_spikes / mean_bsa_count);

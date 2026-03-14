@@ -1,10 +1,10 @@
 # Behavioral Verification: Python vs C++ (Snapshot) Network
 
-## Motivation
+## Background
 
-The C++ port of the classification sweep (`liquid_state_machine_cpp_port`) was producing different baseline firing rates than the Python implementation, despite using the same seed (42). Root cause: C++'s `std::mt19937_64` and NumPy's MT19937 produce different random sequences even with identical seeds (different bit width, state initialization). This means the network topology—neuron parameters, connection weights, positions—diverges between implementations.
+The C++ port produces different baseline firing rates than the Python implementation despite using the same seed (42). C++'s `std::mt19937_64` and NumPy's MT19937 produce different random sequences with identical seeds (different bit width, state initialization), so network topology diverges between implementations.
 
-## Solution: Snapshot Export/Import
+## Snapshot Export/Import
 
 Rather than attempting to match RNG sequences across languages, we export the Python-built network structure to an `.npz` file and load it directly in C++, bypassing all random number generation during network construction.
 
@@ -57,33 +57,31 @@ classification_std              0.019      0.020
 Filename-matched pairs: 155
 
 Per-sample spike count (paired by filename):
-  Pearson r:  0.992   (p=3.4e-140)   → near-perfect correlation
+  Pearson r:  0.992   (p=3.4e-140)
   KS test:    stat=0.037, p=0.874    → same distribution
 
 Per-sample firing rate (paired by filename):
   Pearson r:  0.992
   KS test:    stat=0.053, p=0.465    → same distribution
 
-Classification gap: +2.37pp           → within noise
+Classification gap: +2.37pp           → < 1σ of combined classification variance
 
-VERDICT: PASS — Behavior is statistically equivalent
+VERDICT: PASS
 ```
 
 ![Behavioral Verification Scatter Plot](verify_behavior.png)
 
-With filename-matched pairing (155 samples that both implementations loaded), the per-sample Pearson r is **0.992** — the same audio clip through the same network produces nearly identical spike counts despite different runtime noise RNGs. The 1 Hz mean rate difference and 2.4pp classification gap are within the noise floor (~2 standard deviations of the combined classification variance).
+With filename-matched pairing (155 samples that both implementations loaded), the per-sample Pearson r is **0.992**. The 1 Hz mean rate difference and 2.4pp classification gap are within the combined classification variance (combined SD ≈ 2.8pp, gap < 1σ).
 
 ### Accuracy gap analysis
 
-The 2.4pp accuracy gap (88.0% vs 85.6%) is within statistical noise. The combined standard deviation of the difference is sqrt(0.019² + 0.020²) ≈ 2.8pp, placing the gap at less than 1σ — not statistically significant.
+The 2.4pp accuracy gap (88.0% vs 85.6%) is not statistically significant. The combined standard deviation of the difference is sqrt(0.019² + 0.020²) ≈ 2.8pp, placing the gap at less than 1σ.
 
-Three factors account for it:
+Contributing factors:
 
-1. **Runtime noise divergence** — Voltage noise and current noise are drawn from different RNGs each timestep (NumPy vs `std::mt19937_64`). Same network and input, but slightly different noise realizations produce slightly different spike timing and state vectors fed to the Ridge classifier.
-2. **Small sample size** — 500 samples with 5-fold cross-validation means each fold trains on ~400 and tests on ~100. A handful of borderline samples flipping changes accuracy by 1–2pp.
-3. **Ridge classifier variance** — The 5-repeat std is ~2% for both sides independently, confirming that re-shuffling the train/test split alone moves accuracy by that much.
-
-The per-sample spike count correlation (r = 0.992) is the real signal — the two implementations produce nearly identical responses to the same inputs. The accuracy gap is classifier variance on top of that.
+1. **Runtime noise divergence** — Voltage noise and current noise are drawn from different RNGs each timestep (NumPy vs `std::mt19937_64`). Same network and input, different noise realizations.
+2. **Small sample size** — 500 samples with 5-fold cross-validation means each fold trains on ~400 and tests on ~100.
+3. **Ridge classifier variance** — The 5-repeat std is ~2% for both sides independently.
 
 ## Usage
 

@@ -1,6 +1,6 @@
 # Working Memory / XOR Adaptation Sweep
 
-A parameter sweep over spike-frequency adaptation (adapt_inc, adapt_tau) measuring two higher-order cognitive tasks: **working memory** (5-class recall of digit A from the B+Post epoch) and **temporal XOR** (same vs. different digit pair classification). The central question: **can adaptation sustain a stimulus trace across a silent gap and support nonlinear temporal integration?**
+A parameter sweep over spike-frequency adaptation (adapt_inc, adapt_tau) measuring two tasks: **working memory** (5-class recall of digit A from the B+Post epoch) and **temporal XOR** (same vs. different digit pair classification). Two branches: unmatched (natural rate) and tonic-conductance-matched (rate-controlled at 20 Hz).
 
 ## Key results
 
@@ -11,7 +11,7 @@ A parameter sweep over spike-frequency adaptation (adapt_inc, adapt_tau) measuri
 | **Branch A** (unmatched) | **83.07%** | 0.171 | 5000 ms | 22.1 Hz | +56.46 pp | +47.41 pp |
 | **Branch B** (rate-matched) | **81.90%** | 0.171 | 5000 ms | 18.6 Hz | +55.30 pp | +46.24 pp |
 
-Top-3 configurations converge on the same regime: moderate adapt_inc (0.13-0.23), long adapt_tau (3500-5000 ms). Both branches agree on the optimal point (inc=0.171, tau=5000), and Branch B confirms the effect survives rate matching — the +1.17 pp gap between branches is negligible compared to the +55 pp gain over BSA.
+Top-3 configurations: moderate adapt_inc (0.13-0.23), long adapt_tau (3500-5000 ms). Both branches select the same optimal point (inc=0.171, tau=5000). The +1.17 pp gap between branches is small relative to the +55 pp gain over BSA.
 
 ### Temporal XOR (2-class, chance = 50%)
 
@@ -20,13 +20,11 @@ Top-3 configurations converge on the same regime: moderate adapt_inc (0.13-0.23)
 | **Branch A** (unmatched) | **67.24%** | 0.0707 | 5000 ms | 29.1 Hz | +16.00 pp | +15.29 pp |
 | **Branch B** (rate-matched) | **67.57%** | 0.0527 | 5000 ms | 18.3 Hz | +16.33 pp | +15.62 pp |
 
-XOR peaks at lower adaptation strength than WM (inc ~0.05-0.07 vs ~0.17), but the same long time constant (tau=5000 ms). Branch B slightly *outperforms* Branch A, ruling out rate as the explanation. The optimal XOR regime requires weaker adaptation — enough to sustain a trace, but not so much that it dominates B-epoch dynamics and prevents the nonlinear A-vs-B comparison.
+XOR peaks at lower adaptation strength than WM (inc ~0.05-0.07 vs ~0.17), but the same long time constant (tau=5000 ms). Branch B slightly outperforms Branch A (+0.33 pp).
 
-## Motivation
+## Task description
 
-Classification (the first sweep) tests whether adaptation steers the reservoir into distinct computational modes during stimulus presentation. But the paper's strongest claim is about *working memory* — the reservoir maintaining a representation of a vanished stimulus across a delay period. This requires a fundamentally different computation: information about digit A must persist through a 150 ms silent gap and remain decodable from activity during digit B and after.
-
-The XOR task goes further: classifying whether two sequentially presented digits are the *same* or *different* requires nonlinear integration of information across both epochs — neither digit alone determines the label.
+The working memory task tests whether digit A identity is decodable from reservoir activity during the B+Post epoch, after a 150 ms silent gap. The XOR task tests whether same/different digit pair identity is decodable — the label depends on the relationship between A and B, not either alone.
 
 ## Task structure
 
@@ -59,7 +57,7 @@ Each trial presents two spoken digits separated by a silent gap:
 - **Features**: B+Post epoch only (bins 6-12) — digit A has already ended
 - **Pairs used**: Different-digit pairs only (A ≠ B), so digit B identity cannot trivially reveal A
 - **Chance level**: 20% (5 classes)
-- **What it measures**: Whether the reservoir retains a decodable trace of digit A through the gap and into the B+Post epoch
+- **Measured quantity**: Accuracy of digit A classification from B+Post epoch activity
 
 ### XOR task
 
@@ -67,11 +65,11 @@ Each trial presents two spoken digits separated by a silent gap:
 - **Features**: B+Post epoch only (bins 6-12)
 - **Pairs used**: All 2,500 pairs
 - **Chance level**: 50% (2 classes)
-- **What it measures**: Nonlinear temporal integration — the label depends on the *relationship* between A and B, not either alone
+- **Measured quantity**: Accuracy of same/different classification from B+Post epoch activity
 
 ## The rate-matching confound
 
-Identical to the classification sweep. See [classification sweep README](../classification_adaptation_sweep/README.md) for the full treatment of why single-parameter rate matching always has side effects, and why tonic-conductance-based shunting inhibition is the least-confounded approach.
+Identical to the classification sweep. See [classification sweep README](../classification_adaptation_sweep/README.md) for details.
 
 ## Two-branch design
 

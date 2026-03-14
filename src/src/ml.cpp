@@ -191,6 +191,87 @@ RidgeResult ridge_classify(const Mat& X_train, const std::vector<int>& y_train,
     return ridge_fold_solve(ctx, X_test, y_test, alpha);
 }
 
+RidgePrimalWeights ridge_extract_weights(const Mat& X, const std::vector<int>& y,
+                                          double alpha, const std::vector<int>& classes) {
+    int n = X.rows, p = X.cols;
+    int n_classes = (int)classes.size();
+
+    // Standardize
+    StandardScaler scaler;
+    Mat Xs = scaler.fit_transform(X);
+    nan_to_num(Xs);
+
+    // Build Gram matrix K = Xs * Xs^T (n x n)
+    Mat K(n, n, 0.0);
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                n, n, p, 1.0, Xs.data.data(), p,
+                Xs.data.data(), p, 0.0, K.data.data(), n);
+
+    // One-hot targets Y_bin (n x n_classes), values ±1
+    Mat Y_bin(n, n_classes, -1.0);
+    std::map<int, int> class_to_idx;
+    for (int c = 0; c < n_classes; c++) class_to_idx[classes[c]] = c;
+    for (int i = 0; i < n; i++) {
+        auto it = class_to_idx.find(y[i]);
+        if (it != class_to_idx.end()) Y_bin(i, it->second) = 1.0;
+    }
+
+    // Solve (K + αI) * a = Y  via Cholesky
+    std::vector<double> Ka(n * n);
+    std::copy(K.data.begin(), K.data.end(), Ka.begin());
+    for (int i = 0; i < n; i++) Ka[i * n + i] += alpha;
+
+    // Transpose RHS to column-major for LAPACK
+    std::vector<double> B_col(n * n_classes);
+    for (int i = 0; i < n; i++)
+        for (int c = 0; c < n_classes; c++)
+            B_col[c * n + i] = Y_bin(i, c);
+
+    char uplo = 'U';
+    int info;
+    dposv_(&uplo, &n, &n_classes, Ka.data(), &n, B_col.data(), &n, &info);
+
+    if (info != 0) {
+        fprintf(stderr, "WARNING: ridge_extract_weights dposv failed (info=%d)\n", info);
+    }
+
+    // alpha_mat (n x n_classes) back to row-major
+    Mat alpha_mat(n, n_classes);
+    for (int i = 0; i < n; i++)
+        for (int c = 0; c < n_classes; c++)
+            alpha_mat(i, c) = B_col[c * n + i];
+
+    // Primal weights W = Xs^T * alpha_mat  (p x n_classes)
+    Mat W(p, n_classes, 0.0);
+    cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                p, n_classes, n, 1.0, Xs.data.data(), p,
+                alpha_mat.data.data(), n_classes,
+                0.0, W.data.data(), n_classes);
+
+    // Training accuracy
+    Mat decisions(n, n_classes, 0.0);
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                n, n_classes, n, 1.0, K.data.data(), n,
+                alpha_mat.data.data(), n_classes,
+                0.0, decisions.data.data(), n_classes);
+
+    std::vector<int> preds(n);
+    for (int i = 0; i < n; i++) {
+        int best_c = 0;
+        double best_v = decisions(i, 0);
+        for (int c = 1; c < n_classes; c++) {
+            if (decisions(i, c) > best_v) { best_v = decisions(i, c); best_c = c; }
+        }
+        preds[i] = classes[best_c];
+    }
+    double acc = accuracy_score(y, preds);
+
+    // Intercepts are zero in this formulation (no explicit bias)
+    std::vector<double> intercepts(n_classes, 0.0);
+
+    return {W, intercepts, acc};
+}
+
 double accuracy_score(const std::vector<int>& y_true, const std::vector<int>& y_pred) {
     int n = (int)y_true.size();
     if (n == 0) return 0.0;

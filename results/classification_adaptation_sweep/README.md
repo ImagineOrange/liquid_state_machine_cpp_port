@@ -4,21 +4,19 @@
   <img src="../raster/raster_spike_train_0_george_0.png" alt="Raster spike train for digit 0 (george)" width="600">
 </p>
 
-A parameter sweep over spike-frequency adaptation (adapt_inc, adapt_tau) measuring 5-class spoken digit classification accuracy. The central question: **does SFA steer the reservoir into distinct computational modes, independent of trivial firing rate effects?**
+A parameter sweep over spike-frequency adaptation (adapt_inc, adapt_tau) measuring 5-class spoken digit classification accuracy. Two branches are run: unmatched (natural rate) and tonic-conductance-matched (rate-controlled at 20 Hz).
 
-## Motivation
+## Rate-matching rationale
 
-The paper claims a triple dissociation of computational modes (stimulus encoding, working memory, temporal integration) controlled entirely by a single biophysical parameter: spike-frequency adaptation. To substantiate this claim, we must isolate the effect of adaptation dynamics from confounding variables — most critically, firing rate.
+Changing adaptation changes reservoir firing rate. Rate matching holds firing rate constant across the sweep so that accuracy differences between branches can be attributed to adaptation dynamics rather than rate changes alone.
 
-Changing adaptation changes reservoir firing rate. Without control, a critic can argue: "classification accuracy correlates with adaptation only because adaptation changes rate, and rate determines information capacity." Rate matching is the standard experimental control: hold firing rate constant across the sweep, and any remaining accuracy differences must come from the adaptation dynamics themselves.
-
-## The rate-matching confound
+## Rate-matching approach
 
 ### Previous approach (stimulus current modulation)
 
 The original sweep rate-matched by binary search over `stimulus_current` — the current injected into input neurons when BSA spikes arrive. This is the same parameter optimized in the 8,000-point input grid search (optimal: 0.0518 nA at tau_e=1.05ms, yielding MI=1.06 bits between BSA and input spike output).
 
-**Problem:** Changing stimulus_current changes input neuron firing dynamics, which changes the mutual information between BSA-encoded audio and input layer spike output. The confound is systematic and asymmetric:
+Changing stimulus_current changes input neuron firing dynamics, which changes the mutual information between BSA-encoded audio and input layer spike output. The effect is systematic and asymmetric:
 
 | Calibration direction | When | stim_current | Input MI | Confound |
 |---|---|---|---|---|
@@ -36,11 +34,11 @@ stim=0.5179  rate=126 Hz  MI=1.19 bits  (+12%)
 stim=5.0000  rate=136 Hz  MI=1.12 bits  (+6%)
 ```
 
-This confound is fatal for the paper's central claim: accuracy differences across the adaptation sweep could reflect **input encoding quality covarying with the sweep axis**, not adaptation dynamics.
+Accuracy differences across the adaptation sweep could therefore reflect input encoding quality covarying with the sweep axis rather than adaptation dynamics.
 
-### Why any single-parameter rate matching has side effects
+### Single-parameter rate matching side effects
 
-Rate is an emergent property of the full dynamical system. Clamping it while varying adaptation requires a compensating variable, and any compensating variable will change some aspect of the dynamics:
+Rate is an emergent property of the full dynamical system. Clamping it while varying adaptation requires a compensating variable, and any compensating variable changes some aspect of the dynamics:
 
 | Rate-matching knob | What it confounds |
 |---|---|
@@ -50,11 +48,9 @@ Rate is an emergent property of the full dynamical system. Clamping it while var
 | core_core_mult (recurrent weights) | Recurrent amplification — directly entangled with adaptation |
 | V_threshold | Spike detection threshold, effective gain |
 
-No single-knob rate matching is confound-free. The question is which confound is **least entangled with the variable under study**.
+No single-parameter rate matching is free of side effects. Tonic conductance was chosen because it acts on reservoir neurons only and does not alter input encoding.
 
 ## Two-branch design
-
-We run two complementary sweep branches. If the triple dissociation appears in both, it is robust to rate confounds.
 
 ### Branch A: Unmatched (natural rate)
 
@@ -62,8 +58,7 @@ We run two complementary sweep branches. If the triple dissociation appears in b
 - **tonic_conductance**: None (0.0)
 - **Rate**: Varies naturally with adaptation parameters
 - **Input encoding**: Identical across all grid points (MI = 1.06 bits preserved)
-- **Interpretation**: Shows the full effect of adaptation including its natural rate modulation. Vulnerable to the criticism that accuracy differences are "just rate effects."
-- **Controls for**: Input encoding confound (eliminated)
+- **Controls for**: Input encoding (fixed across all grid points)
 
 ### Branch B: Tonic-conductance-matched (shunting inhibition)
 
@@ -71,8 +66,7 @@ We run two complementary sweep branches. If the triple dissociation appears in b
 - **tonic_conductance**: Calibrated per grid point via binary search to match target reservoir firing rate. Applied as `g_tonic * (E_rev - V)` to reservoir neurons only. Reversal is automatically chosen: E_i (-80 mV) if natural rate > target (shunting inhibition), E_e (0 mV) if natural rate < target (tonic excitation).
 - **Rate**: Matched to 20 Hz (sensory cortex evoked rate, see below) across all grid points. Only reservoir neuron firing is measured/matched.
 - **Input encoding**: Identical across all grid points (MI = 1.06 bits preserved)
-- **Interpretation**: Isolates adaptation's computational effect from rate changes. Any accuracy differences cannot be attributed to rate or input encoding.
-- **Controls for**: Both input encoding confound and firing rate confound
+- **Controls for**: Both input encoding (fixed) and firing rate (matched)
 
 ### Why shunting inhibition, not tonic current
 
@@ -83,23 +77,9 @@ Tonic conductance `g_tonic * (E_rev - V)` competes with synaptic drive on equal 
 - **Rate too high** (low adaptation): E_rev = E_i (-80 mV) — shunting inhibition, divides membrane gain
 - **Rate too low** (high adaptation): E_rev = E_e (0 mV) — tonic excitatory drive, boosts subthreshold depolarization
 
-### Biological interpretation of tonic conductance
+### Rate target: 20 Hz
 
-Tonic conductance applied to reservoir neurons is biophysically interpretable as:
-- **GABAergic neuromodulatory tone** (inhibitory mode) — tonic GABA_A conductance from extrasynaptic receptors, widely documented in cortex (Farrant & Nusser 2005)
-- **Shunting inhibition from interneuron populations** (inhibitory mode) — basket/chandelier cells providing divisive normalization
-- **Thalamic excitatory drive** (excitatory mode) — tonic glutamatergic input from thalamic relay neurons
-- **Cholinergic/noradrenergic modulation** (excitatory mode) — neuromodulatory depolarization increasing network excitability
-
-All of these are standard mechanisms in computational neuroscience for controlling a network's gain and operating point without changing its connectivity or input encoding.
-
-### Rate target: 20 Hz (sensory cortex evoked rate)
-
-Branch B calibrates reservoir firing rate to a fixed 20 Hz target. This value is independently motivated by sensory cortex electrophysiology, not derived from any parameter of the model:
-
-- **Auditory cortex evoked rates** during stimulus presentation range from ~10-40 Hz in rodent and primate recordings (Hromadka et al. 2008; DeWeese et al. 2003; Sakata & Harris 2009)
-- **20 Hz** sits at the center of this range, avoiding extremes where network dynamics might become degenerate (too sparse at 5 Hz, too saturated at 50+ Hz)
-- **Literature-grounded targets are reviewer-proof**: the justification is a single sentence citing established physiology, with no dependency on model-specific calibration runs
+Branch B calibrates reservoir firing rate to a fixed 20 Hz target. Auditory cortex evoked rates during stimulus presentation range from ~10-40 Hz in rodent and primate recordings (Hromadka et al. 2008; DeWeese et al. 2003; Sakata & Harris 2009). 20 Hz is the midpoint of this range.
 
 Only reservoir neuron firing rates are measured and matched. Input neuron rates are left untouched (they are determined entirely by BSA encoding + fixed stimulus_current).
 
@@ -107,14 +87,14 @@ Only reservoir neuron firing rates are measured and matched. Input neuron rates 
 
 Calibration runs until reservoir firing rate is within +/-2 Hz of the 20 Hz target. There is no iteration limit — binary search continues indefinitely. If the search interval collapses, it is automatically widened and the search continues.
 
-### What convergence between branches demonstrates
+### Branch comparison interpretation
 
-| Branch A result | Branch B result | Conclusion |
+| Branch A result | Branch B result | Interpretation |
 |---|---|---|
-| Dissociation present | Dissociation present | **Robust**: adaptation steers computation independent of rate |
-| Dissociation present | Dissociation absent | Rate modulation is part of the mechanism (not a confound, but a feature) |
-| Dissociation absent | Dissociation present | Rate masking was hiding the effect (unlikely but informative) |
-| Dissociation absent | Dissociation absent | No evidence for adaptation-driven mode switching |
+| Effect present | Effect present | Effect is not explained by rate differences alone |
+| Effect present | Effect absent | Effect covaries with rate |
+| Effect absent | Effect present | Rate variation was masking the effect |
+| Effect absent | Effect absent | No effect observed |
 
 ## Fixed parameters
 
@@ -230,7 +210,7 @@ A comprehensive benchmark of 30+ readout methods on BSA-encoded spike train data
 | Linear SVM | 94.8% | Linear |
 | LDA | 93.6% | Linear |
 
-Nonlinear methods outperform linear, but linear readout is the scientifically correct choice for LSM: the reservoir must perform the nonlinear transformation; a nonlinear readout would conflate readout power with reservoir computation.
+Nonlinear methods outperform linear. Linear readout is used for LSM evaluation per convention (Maass et al. 2002).
 
 ### Statistical power
 

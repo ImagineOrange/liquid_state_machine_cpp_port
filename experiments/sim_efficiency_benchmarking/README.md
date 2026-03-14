@@ -96,12 +96,12 @@ comparisons) are fast enough. Not worth the code complexity.
 | Multi-step noise K>1 | ~1.00x | No benefit over K=1 |
 | Caller-loop #1-#4 | 1.02x | Marginal — not implemented |
 
-### Key insight
+### Summary
 
-The entire meaningful speedup comes from **separating RNG calls from the neuron
-arithmetic loop**. With 3 `rng_normal()` calls interleaved in the membrane
+The measured speedup comes from separating RNG calls from the neuron
+arithmetic loop. With 3 `rng_normal()` calls interleaved in the membrane
 equation, function call barriers prevent auto-vectorization. Pre-generating all
-normals into a small buffer (14 KB, fits L1) lets the compiler vectorize the
+normals into a small buffer (14 KB, fits L1) allows the compiler to vectorize the
 pure-arithmetic neuron loop.
 
 ### Projected sweep savings (pre-buffered noise only)

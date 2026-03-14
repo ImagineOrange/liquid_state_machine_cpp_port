@@ -454,3 +454,10 @@ int run_noisy_sweep(int argc, char** argv,
                      const std::string& data_dir,
                      const std::vector<double>& tau_values,
                      bool do_per_bin = false);
+
+int run_mechanistic_interp(int argc, char** argv,
+                            int n_workers, const std::string& output_dir,
+                            const std::string& data_dir);
+
+int run_mech_raster(int n_workers, const std::string& output_dir,
+                     const std::string& data_dir);
