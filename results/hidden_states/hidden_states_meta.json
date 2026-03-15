@@ -1,0 +1,13 @@
+{
+  "adapt_inc": 0.1710,
+  "adapt_tau": 5000.0,
+  "g_tonic": 2.500000,
+  "tonic_reversal": -80.0,
+  "calibrated_rate_hz": 19.6,
+  "bin_ms": 20.0,
+  "n_bins": 26,
+  "n_reservoir": 604,
+  "n_trials": 18,
+  "trials_per_digit": 3,
+  "digits": [0, 1, 2, 3, 4, 5]
+}

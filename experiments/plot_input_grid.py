@@ -97,8 +97,9 @@ ax.set_title("BEST across all adapt_inc", fontweight='bold')
 for i in range(n_adapt_show + 1, len(list(axes_flat))):
     axes_flat[i].set_visible(False)
 
-fig1.colorbar(im, ax=np.array(axes1).ravel().tolist(), label='Composite Score', shrink=0.6)
-plt.tight_layout()
+plt.tight_layout(rect=[0, 0, 0.92, 0.95])
+cbar_ax = fig1.add_axes([0.93, 0.15, 0.02, 0.7])
+fig1.colorbar(im, cax=cbar_ax, label='Composite Score')
 fig1.savefig(csv_path.replace('.csv', '_heatmaps.png'), dpi=150, bbox_inches='tight')
 print(f"\nSaved: {csv_path.replace('.csv', '_heatmaps.png')}")
 

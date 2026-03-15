@@ -41,8 +41,9 @@ NetworkConfig make_base_config() {
 
 void create_ring_zone_network(SphericalNetwork& net, ZoneInfo& zone_info,
                               const NetworkConfig& cfg, bool quiet,
-                              const std::string& connectivity_regime) {
-    rng_seed(42); // config random_seed
+                              const std::string& connectivity_regime,
+                              int override_seed) {
+    rng_seed(override_seed >= 0 ? (uint64_t)override_seed : 42);
 
     net.init(cfg);
 
@@ -685,8 +686,9 @@ void build_full_network(SphericalNetwork& net, ZoneInfo& zone_info,
                         bool quiet,
                         const DynamicalOverrides* dyn_ovr,
                         const std::string& connectivity_regime,
-                        bool remove_nonarc) {
-    create_ring_zone_network(net, zone_info, cfg, quiet, connectivity_regime);
+                        bool remove_nonarc,
+                        int override_seed) {
+    create_ring_zone_network(net, zone_info, cfg, quiet, connectivity_regime, override_seed);
 
     if (dyn_ovr != nullptr) {
         apply_dynamical_overrides(net, zone_info, dt, *dyn_ovr);

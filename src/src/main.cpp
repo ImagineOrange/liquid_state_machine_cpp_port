@@ -41,6 +41,13 @@ int main(int argc, char** argv) {
     bool noisy_per_bin = false;
     bool mech_interp = false;
     bool mech_raster = false;
+    bool extended_tau = false;
+    bool gap_sweep = false;
+    bool hidden_states = false;
+    bool crossover_sweep = false;
+    bool gap_sweep_ext = false;
+    bool ablation = false;
+    bool multi_seed = false;
 
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) == "--arms" && i + 1 < argc) arms = argv[++i];
@@ -80,6 +87,13 @@ int main(int argc, char** argv) {
         else if (std::string(argv[i]) == "--noisy-per-bin") noisy_per_bin = true;
         else if (std::string(argv[i]) == "--mech-interp") mech_interp = true;
         else if (std::string(argv[i]) == "--mech-raster") mech_raster = true;
+        else if (std::string(argv[i]) == "--extended-tau") extended_tau = true;
+        else if (std::string(argv[i]) == "--gap-sweep") gap_sweep = true;
+        else if (std::string(argv[i]) == "--hidden-states") hidden_states = true;
+        else if (std::string(argv[i]) == "--crossover-sweep") crossover_sweep = true;
+        else if (std::string(argv[i]) == "--gap-sweep-ext") gap_sweep_ext = true;
+        else if (std::string(argv[i]) == "--ablation") ablation = true;
+        else if (std::string(argv[i]) == "--multi-seed") multi_seed = true;
     }
 
     // Default: use network_snapshot.npz next to the binary if it exists
@@ -187,6 +201,69 @@ int main(int argc, char** argv) {
         }
         fs::create_directories(output_dir);
         return run_mechanistic_interp(argc, argv, n_workers, output_dir, data_dir);
+    }
+
+    // --extended-tau mode
+    if (extended_tau) {
+        if (output_dir.empty()) {
+            output_dir = (base_dir / "results" / "extended_tau_sweep").string();
+        }
+        fs::create_directories(output_dir);
+        return run_extended_tau(argc, argv, n_workers, output_dir, data_dir);
+    }
+
+    // --crossover-sweep mode
+    if (crossover_sweep) {
+        if (output_dir.empty()) {
+            output_dir = (base_dir / "results" / "crossover_sweep").string();
+        }
+        fs::create_directories(output_dir);
+        return run_crossover_sweep(argc, argv, n_workers, output_dir, data_dir);
+    }
+
+    // --hidden-states mode
+    if (hidden_states) {
+        if (output_dir.empty()) {
+            output_dir = (base_dir / "results" / "hidden_states").string();
+        }
+        fs::create_directories(output_dir);
+        return run_hidden_states(argc, argv, n_workers, output_dir, data_dir);
+    }
+
+    // --multi-seed mode
+    if (multi_seed) {
+        if (output_dir.empty()) {
+            output_dir = (base_dir / "results" / "multi_seed").string();
+        }
+        fs::create_directories(output_dir);
+        return run_multi_seed(argc, argv, n_workers, output_dir, data_dir);
+    }
+
+    // --ablation mode
+    if (ablation) {
+        if (output_dir.empty()) {
+            output_dir = (base_dir / "results" / "ablation").string();
+        }
+        fs::create_directories(output_dir);
+        return run_ablation(argc, argv, n_workers, output_dir, data_dir);
+    }
+
+    // --gap-sweep-ext mode (focused long-gap experiment)
+    if (gap_sweep_ext) {
+        if (output_dir.empty()) {
+            output_dir = (base_dir / "results" / "gap_sweep_ext").string();
+        }
+        fs::create_directories(output_dir);
+        return run_gap_sweep_ext(argc, argv, n_workers, output_dir, data_dir);
+    }
+
+    // --gap-sweep mode
+    if (gap_sweep) {
+        if (output_dir.empty()) {
+            output_dir = (base_dir / "results" / "gap_sweep").string();
+        }
+        fs::create_directories(output_dir);
+        return run_gap_sweep(argc, argv, n_workers, output_dir, data_dir);
     }
 
     // --wm-sweep mode

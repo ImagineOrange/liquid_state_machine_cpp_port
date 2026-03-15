@@ -33,7 +33,10 @@ SRCS = $(SRCDIR)/main.cpp \
        $(SRCDIR)/wm_sweep.cpp \
        $(SRCDIR)/noisy_classification.cpp \
        $(SRCDIR)/online_classification.cpp \
+       $(SRCDIR)/extended_sweep.cpp \
        $(SRCDIR)/mechanistic_interp.cpp \
+       $(SRCDIR)/hidden_states.cpp \
+       $(SRCDIR)/crossover_sweep.cpp \
        $(SRCDIR)/ml.cpp \
        $(SRCDIR)/network.cpp \
        $(SRCDIR)/builder.cpp \

@@ -1644,26 +1644,41 @@ int run_mech_raster(int n_workers, const std::string& output_dir,
         SimConfig rsim = sim_cfg;
         rsim.audio_duration_ms = ep.total_stim_end_ms + 5.0;
 
-        printf("    Simulating...\n");
+        // Build adaptation snapshot times every 1 ms
+        double total_trial_ms = rsim.audio_duration_ms + rsim.post_stimulus_ms;
+        int n_adapt_snaps = (int)std::ceil(total_trial_ms);
+        std::vector<double> adapt_snap_times;
+        adapt_snap_times.reserve(n_adapt_snaps);
+        for (int ms = 0; ms < n_adapt_snaps; ms++)
+            adapt_snap_times.push_back(ms + 0.95);  // just before each ms boundary
+
+        printf("    Simulating (%d adapt snapshots)...\n", n_adapt_snaps);
         auto result = run_sample_with_std(net, ep.compound, zone_info, rsim,
                                             STD_U, STD_TAU_REC, masks,
-                                            {ep.stim_b_offset_ms});
+                                            adapt_snap_times);
 
         int n_res_local = (int)zone_info.reservoir_zone_indices.size();
         std::unordered_map<int, int> idx_to_pos;
         for (int p = 0; p < n_res_local; p++)
             idx_to_pos[zone_info.reservoir_zone_indices[p]] = p;
 
+        // Reservoir-only spikes (backward compat: pos is reservoir-local 0..n_res-1)
         std::vector<std::pair<double, int>> spike_events;
+        // All-neuron spikes (global neuron IDs for the 3D vis)
+        std::vector<std::pair<double, int>> all_spike_events;
         double dt_val = sim_cfg.dt;
         for (int step = 0; step < (int)result.activity_record.size(); step++) {
             double t = step * dt_val;
             for (int nid : result.activity_record[step]) {
+                all_spike_events.push_back({t, nid});
                 auto it = idx_to_pos.find(nid);
                 if (it != idx_to_pos.end())
                     spike_events.push_back({t, it->second});
             }
         }
+
+        // Extract adaptation snapshots into time x neuron matrix
+        int n_snaps_actual = std::min(n_adapt_snaps, (int)result.adapt_snapshots.size());
 
         if (ri > 0) fprintf(rf, ",\n");
         fprintf(rf, "    {\n");
@@ -1674,6 +1689,7 @@ int run_mech_raster(int n_workers, const std::string& output_dir,
         fprintf(rf, "      \"rate_hz\": %.1f,\n", rcal.rate_hz);
         fprintf(rf, "      \"n_reservoir\": %d,\n", n_res_local);
         fprintf(rf, "      \"n_spikes\": %d,\n", (int)spike_events.size());
+        fprintf(rf, "      \"n_adapt_snapshots\": %d,\n", n_snaps_actual);
 
         fprintf(rf, "      \"spike_times_ms\": [");
         for (size_t s = 0; s < spike_events.size(); s++) {
@@ -1689,10 +1705,46 @@ int run_mech_raster(int n_workers, const std::string& output_dir,
             if (s % 500 == 0 && s > 0) fprintf(rf, "\n        ");
             fprintf(rf, "%d", spike_events[s].second);
         }
+        fprintf(rf, "],\n");
+
+        // All-neuron spikes (global IDs, includes input neurons)
+        fprintf(rf, "      \"n_total\": %d,\n", net.n_neurons);
+        fprintf(rf, "      \"all_spike_times_ms\": [");
+        for (size_t s = 0; s < all_spike_events.size(); s++) {
+            if (s > 0) fprintf(rf, ",");
+            if (s % 500 == 0 && s > 0) fprintf(rf, "\n        ");
+            fprintf(rf, "%.1f", all_spike_events[s].first);
+        }
+        fprintf(rf, "],\n");
+
+        fprintf(rf, "      \"all_spike_neuron_ids\": [");
+        for (size_t s = 0; s < all_spike_events.size(); s++) {
+            if (s > 0) fprintf(rf, ",");
+            if (s % 500 == 0 && s > 0) fprintf(rf, "\n        ");
+            fprintf(rf, "%d", all_spike_events[s].second);
+        }
+        fprintf(rf, "],\n");
+
+        // Dump adaptation snapshots as flat row-major array [time][neuron]
+        fprintf(rf, "      \"adapt_snapshots\": [");
+        bool first_val = true;
+        for (int t = 0; t < n_snaps_actual; t++) {
+            for (int p = 0; p < n_res_local; p++) {
+                int nid = zone_info.reservoir_zone_indices[p];
+                double val = (nid < (int)result.adapt_snapshots[t].size())
+                             ? result.adapt_snapshots[t][nid] : 0.0;
+                if (!first_val) fprintf(rf, ",");
+                if ((t * n_res_local + p) % 1000 == 0 && !first_val)
+                    fprintf(rf, "\n        ");
+                fprintf(rf, "%.4f", val);
+                first_val = false;
+            }
+        }
         fprintf(rf, "]\n");
 
         fprintf(rf, "    }");
-        printf("    %s: %d spikes\n", raster_labels[ri], (int)spike_events.size());
+        printf("    %s: %d spikes, %d adapt snapshots\n",
+               raster_labels[ri], (int)spike_events.size(), n_snaps_actual);
     }
 
     fprintf(rf, "\n  ]\n");

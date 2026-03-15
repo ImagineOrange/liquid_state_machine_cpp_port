@@ -461,3 +461,31 @@ int run_mechanistic_interp(int argc, char** argv,
 
 int run_mech_raster(int n_workers, const std::string& output_dir,
                      const std::string& data_dir);
+
+int run_extended_tau(int argc, char** argv,
+                      int n_workers, const std::string& output_dir,
+                      const std::string& data_dir);
+
+int run_gap_sweep(int argc, char** argv,
+                   int n_workers, const std::string& output_dir,
+                   const std::string& data_dir);
+
+int run_gap_sweep_ext(int argc, char** argv,
+                       int n_workers, const std::string& output_dir,
+                       const std::string& data_dir);
+
+int run_hidden_states(int argc, char** argv,
+                       int n_workers, const std::string& output_dir,
+                       const std::string& data_dir);
+
+int run_crossover_sweep(int argc, char** argv,
+                         int n_workers, const std::string& output_dir,
+                         const std::string& data_dir);
+
+int run_ablation(int argc, char** argv,
+                  int n_workers, const std::string& output_dir,
+                  const std::string& data_dir);
+
+int run_multi_seed(int argc, char** argv,
+                    int n_workers, const std::string& output_dir,
+                    const std::string& data_dir);

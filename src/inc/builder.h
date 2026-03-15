@@ -58,7 +58,8 @@ struct DynamicalOverrides {
 // Network construction
 void create_ring_zone_network(SphericalNetwork& net, ZoneInfo& zone_info,
                               const NetworkConfig& cfg, bool quiet = false,
-                              const std::string& connectivity_regime = "default");
+                              const std::string& connectivity_regime = "default",
+                              int override_seed = -1);
 
 // Apply optimized input neuron regime (tau_e, adapt_inc, skip_stim_nmda).
 // Called automatically at the end of apply_config_b_overrides and
@@ -110,7 +111,8 @@ void build_full_network(SphericalNetwork& net, ZoneInfo& zone_info,
                         bool quiet = false,
                         const DynamicalOverrides* dyn_ovr = nullptr,
                         const std::string& connectivity_regime = "default",
-                        bool remove_nonarc = false);
+                        bool remove_nonarc = false,
+                        int override_seed = -1);
 
 // Load pre-built network from Python-exported .npz snapshot.
 // This bypasses all RNG-dependent construction, giving bit-identical
